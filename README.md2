@@ -1,12 +1,12 @@
-# qmd-rs
+# iqmd-rs
 
-Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engine for humans and agents.
+Lean Intelligent Query Markup Documents in Rust: a fast, local-first markdown retrieval engine for humans and agents.
 
-`qmd-rs` is a joyful little powerhouse: small binary, quick startup, practical CLI, and MCP tools that make your notes and docs easy to search from both terminal and AI workflows.
+`iqmd-rs` is a joyful little powerhouse: small binary, quick startup, practical CLI, and MCP tools that make your notes and docs easy to search from both terminal and AI workflows.
 
-## Why qmd-rs
+## Why iqmd-rs
 
-- Rust-native rewrite of the original qmd idea
+- Rust-native rewrite of the original iqmd idea
 - No in-process ML runtime baggage
 - Uses OpenAI-compatible APIs for embeddings, expansion, and reranking
 - SQLite + FTS5 core with vector-ready storage
@@ -21,7 +21,7 @@ Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engi
 - Phase 5: get/multi-get + context-aware query output
 - Phase 6: MCP server surfaces
   - `stdio`: full toolset
-  - `http/sse`: SSE heartbeat and `qmd_status` tool endpoint
+  - `http/sse`: SSE heartbeat and `iqmd_status` tool endpoint
 - Phase 7: CI + core tests (in progress and improving)
 
 ## Architecture Snapshot
@@ -37,7 +37,7 @@ Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engi
 
 ```bash
 git clone <repo-url>
-cd qmd-rs
+cd iqmd-rs
 cargo build
 ```
 
@@ -56,7 +56,7 @@ Precedence: `defaults < config file < env/CLI`.
 
 Default config file path:
 
-- macOS/Linux: `~/.config/qmd/config.toml`
+- macOS/Linux: `~/.config/iqmd/config.toml`
 
 Example:
 
@@ -75,7 +75,7 @@ expansion_variants = 2
 rerank_top_k = 30
 
 [storage]
-db_path = "~/.cache/qmd/index.sqlite"
+db_path = "~/.cache/iqmd/index.sqlite"
 ```
 
 Supported env vars:
@@ -90,16 +90,16 @@ Supported env vars:
 ## CLI Commands
 
 ```bash
-qmd collection <add|remove|list|rename>
-qmd context <add|rm|list>
-qmd embed [--force]
-qmd search <query>
-qmd vsearch <query>
-qmd query <query>
-qmd get <docid|path>
-qmd multi-get <pattern>
-qmd mcp [--http] [--port]
-qmd status [--verbose] [--smoke-api]
+iqmd collection <add|remove|list|rename>
+iqmd context <add|rm|list>
+iqmd embed [--force]
+iqmd search <query>
+iqmd vsearch <query>
+iqmd query <query>
+iqmd get <docid|path>
+iqmd multi-get <pattern>
+iqmd mcp [--http] [--port]
+iqmd status [--verbose] [--smoke-api]
 ```
 
 ## Quickstart
@@ -107,33 +107,33 @@ qmd status [--verbose] [--smoke-api]
 1. Register a collection:
 
 ```bash
-qmd collection add /path/to/notes
+iqmd collection add /path/to/notes
 ```
 
 2. Embed markdown content:
 
 ```bash
-qmd embed
+iqmd embed
 ```
 
 3. Search:
 
 ```bash
-qmd search "rust error handling"
-qmd vsearch "safe async abstraction"
-qmd query "best chunking strategy for markdown"
+iqmd search "rust error handling"
+iqmd vsearch "safe async abstraction"
+iqmd query "best chunking strategy for markdown"
 ```
 
 4. Fetch docs:
 
 ```bash
-qmd get abc123
-qmd multi-get "/path/to/notes/*.md"
+iqmd get abc123
+iqmd multi-get "/path/to/notes/*.md"
 ```
 
 ## Search Pipeline (Hybrid)
 
-`qmd query` currently performs:
+`iqmd query` currently performs:
 
 - LLM-based query expansion
 - Parallel BM25 + vector retrieval
@@ -158,36 +158,36 @@ Also includes distance decay and overlap behavior to improve downstream retrieva
 ### Stdio Mode (Full Toolset)
 
 ```bash
-qmd mcp
+iqmd mcp
 ```
 
 Send JSON lines like:
 
 ```json
-{"tool":"qmd_status","args":{}}
-{"tool":"qmd_search","args":{"query":"test"}}
-{"tool":"qmd_get","args":{"selector":"abc123"}}
+{"tool":"iqmd_status","args":{}}
+{"tool":"iqmd_search","args":{"query":"test"}}
+{"tool":"iqmd_get","args":{"selector":"abc123"}}
 ```
 
 Available tools:
 
-- `qmd_search`
-- `qmd_vector_search`
-- `qmd_deep_search`
-- `qmd_get`
-- `qmd_multi_get`
-- `qmd_status`
+- `iqmd_search`
+- `iqmd_vector_search`
+- `iqmd_deep_search`
+- `iqmd_get`
+- `iqmd_multi_get`
+- `iqmd_status`
 
 ### HTTP/SSE Mode
 
 ```bash
-qmd mcp --http --port 8080
+iqmd mcp --http --port 8080
 ```
 
 Endpoints:
 
 - `GET /events`: SSE heartbeat stream
-- `POST /tool`: supports full toolset (`qmd_search`, `qmd_vector_search`, `qmd_deep_search`, `qmd_get`, `qmd_multi_get`, `qmd_status`)
+- `POST /tool`: currently supports `iqmd_status`
 
 ## CI
 
@@ -198,18 +198,18 @@ GitHub Actions workflow runs on push and PR:
 - `cargo test --all-targets`
 - `cargo check --all-targets`
 
-See [ci.yml](/Users/origo/src/qmd-rs/.github/workflows/ci.yml).
+See [ci.yml](/Users/origo/src/iqmd-rs/.github/workflows/ci.yml).
 
 ## Project Structure
 
-- [src/main.rs](/Users/origo/src/qmd-rs/src/main.rs): CLI entrypoint and command dispatch
-- [src/config.rs](/Users/origo/src/qmd-rs/src/config.rs): config loading and validation
-- [src/db.rs](/Users/origo/src/qmd-rs/src/db.rs): migrations and repository operations
-- [src/chunker.rs](/Users/origo/src/qmd-rs/src/chunker.rs): markdown-aware chunking
-- [src/ingest.rs](/Users/origo/src/qmd-rs/src/ingest.rs): embed pipeline
-- [src/search.rs](/Users/origo/src/qmd-rs/src/search.rs): BM25/vector/hybrid retrieval
-- [src/api.rs](/Users/origo/src/qmd-rs/src/api.rs): OpenAI-compatible API calls
-- [src/mcp.rs](/Users/origo/src/qmd-rs/src/mcp.rs): MCP stdio/HTTP server surfaces
+- [src/main.rs](/Users/origo/src/iqmd-rs/src/main.rs): CLI entrypoint and command dispatch
+- [src/config.rs](/Users/origo/src/iqmd-rs/src/config.rs): config loading and validation
+- [src/db.rs](/Users/origo/src/iqmd-rs/src/db.rs): migrations and repository operations
+- [src/chunker.rs](/Users/origo/src/iqmd-rs/src/chunker.rs): markdown-aware chunking
+- [src/ingest.rs](/Users/origo/src/iqmd-rs/src/ingest.rs): embed pipeline
+- [src/search.rs](/Users/origo/src/iqmd-rs/src/search.rs): BM25/vector/hybrid retrieval
+- [src/api.rs](/Users/origo/src/iqmd-rs/src/api.rs): OpenAI-compatible API calls
+- [src/mcp.rs](/Users/origo/src/iqmd-rs/src/mcp.rs): MCP stdio/HTTP server surfaces
 
 ## What’s Next
 

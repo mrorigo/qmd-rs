@@ -87,7 +87,14 @@ pub async fn run_stdio(cfg: Config) -> Result<()> {
 /// Returns an error if binding or serving fails.
 pub async fn run_http(cfg: Config, port: u16) -> Result<()> {
     let app = Router::new()
-        .route("/tool", post(http_tool))
+        .route(
+            "/tool",
+            post(
+                |State(state): State<AppState>, Json(raw): Json<Value>| async move {
+                    Json(handle_http_tool(&state.cfg, raw))
+                },
+            ),
+        )
         .route("/events", get(sse_events))
         .with_state(AppState { cfg });
 
@@ -99,35 +106,27 @@ pub async fn run_http(cfg: Config, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn http_tool(State(state): State<AppState>, Json(raw): Json<Value>) -> Json<ToolResponse> {
+fn handle_http_tool(cfg: &Config, raw: Value) -> ToolResponse {
     let req: ToolRequest = match serde_json::from_value(raw) {
         Ok(v) => v,
         Err(err) => {
-            return Json(ToolResponse {
+            return ToolResponse {
                 ok: false,
                 result: json!({"error": err.to_string()}),
-            });
+            };
         }
     };
 
-    let res = if req.tool == "qmd_status" {
-        match Database::open(&state.cfg)
-            .and_then(|db| db.health_report())
-            .and_then(|v| serde_json::to_value(v).map_err(anyhow::Error::from))
-        {
-            Ok(result) => ToolResponse { ok: true, result },
-            Err(err) => ToolResponse {
-                ok: false,
-                result: json!({"error": err.to_string()}),
-            },
-        }
-    } else {
-        ToolResponse {
+    let res = match tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(dispatch_tool(cfg, &req.tool, req.args))
+    }) {
+        Ok(result) => ToolResponse { ok: true, result },
+        Err(err) => ToolResponse {
             ok: false,
-            result: json!({"error": "HTTP /tool currently supports only qmd_status; use stdio mode for full toolset"}),
-        }
+            result: json!({"error": err.to_string()}),
+        },
     };
-    Json(res)
+    res
 }
 
 async fn sse_events() -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
