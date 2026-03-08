@@ -137,6 +137,7 @@ fn print_status(cfg: &config::Config, health: &db::HealthReport, verbose: bool) 
     println!("db.migrations_applied={}", health.applied_migrations);
     println!("index.documents_fts={}", health.has_documents_fts);
     println!("index.vectors_vec={}", health.has_vectors_vec);
+    println!("vector.mode={}", health.vector_mode);
     println!("count.collections={}", health.total_collections);
     println!("count.contexts={}", health.total_contexts);
     println!("count.documents={}", health.total_documents);

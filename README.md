@@ -18,7 +18,7 @@ Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engi
 - Runtime: Tokio
 - Storage: SQLite (`rusqlite`, bundled SQLite)
 - Full-text: FTS5 (`documents_fts`)
-- Vector data: chunk embeddings stored in DB (`embedding_json`) and optional `sqlite-vec` table when available
+- Vector data: chunk embeddings stored in DB (`embedding_json`) with bundled `sqlite-vec` (`vec0`) native activation when available
 - API client: `reqwest` against OpenAI-compatible endpoints
 
 ## Install and Build
@@ -177,6 +177,12 @@ Endpoints:
 - `GET /events`: SSE heartbeat stream
 - `POST /tool`: supports full toolset (`qmd_search`, `qmd_vector_search`, `qmd_deep_search`, `qmd_get`, `qmd_multi_get`, `qmd_status`)
 
+Vector activation visibility:
+
+- `qmd status` prints `vector.mode`
+- `native-sqlite-vec` means vec0 is active
+- `fallback-json-cosine` means JSON embedding fallback path is active
+
 ## CI
 
 GitHub Actions workflow runs on push and PR:
@@ -201,8 +207,8 @@ See [ci.yml](.github/workflows/ci.yml).
 
 ## What’s Next
 
-- Full HTTP tool parity with stdio mode
-- Native `sqlite-vec` activation and query path
+- HTTP transport hardening (timeouts/auth/rate limiting) and MCP ergonomics
+- Native `sqlite-vec` activation and query path (currently optional/fallback to stored JSON embeddings + app-side cosine scoring)
 - More deterministic reranker parsing and scoring contracts
 - richer tests for ranking math and retrieval regression fixtures
 - MCP protocol conformance polishing with `rmcp`

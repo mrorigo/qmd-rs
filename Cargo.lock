@@ -988,6 +988,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlite-vec",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1453,6 +1454,15 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.7-alpha.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9dad2e5788b411800d8e15d55ee2c672ba0c0c87076713a1e6e2c9b83372a92"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

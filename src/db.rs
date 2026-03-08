@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Once,
 };
 
 const MIGRATIONS: &[(&str, &str)] = &[
@@ -109,6 +110,8 @@ pub struct HealthReport {
     pub has_vectors_vec: bool,
     /// Optional note when vector virtual table is unavailable.
     pub vectors_note: Option<String>,
+    /// Active vector execution mode.
+    pub vector_mode: String,
     /// Collection rows.
     pub total_collections: i64,
     /// Context rows.
@@ -166,6 +169,8 @@ pub struct Database {
     db_path: PathBuf,
 }
 
+static REGISTER_VEC0: Once = Once::new();
+
 impl Database {
     /// Open the database, run migrations, and initialize virtual indexes.
     ///
@@ -178,6 +183,7 @@ impl Database {
     /// # Errors
     /// Returns an error when opening, migrating, or creating directories fails.
     pub fn open(cfg: &Config) -> Result<Self> {
+        register_vec0_extension();
         ensure_parent_dir(&cfg.storage.db_path)?;
         let conn = Connection::open(&cfg.storage.db_path).with_context(|| {
             format!(
@@ -548,11 +554,12 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         let applied_migrations = self.migration_count()?;
         let has_documents_fts = self.has_table("documents_fts")?;
         let has_vectors_vec = self.has_table("vectors_vec")?;
+        let native_vec = self.vec_version().is_ok();
 
-        let vectors_note = if has_vectors_vec {
+        let vectors_note = if has_vectors_vec && native_vec {
             None
         } else {
-            Some("sqlite-vec virtual table not available (module vec0 may be missing)".to_string())
+            Some("sqlite-vec native path inactive; using JSON embedding fallback path".to_string())
         };
 
         Ok(HealthReport {
@@ -561,6 +568,11 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             has_documents_fts,
             has_vectors_vec,
             vectors_note,
+            vector_mode: if has_vectors_vec && native_vec {
+                "native-sqlite-vec".to_string()
+            } else {
+                "fallback-json-cosine".to_string()
+            },
             total_collections: self.count("collections")?,
             total_contexts: self.count("path_contexts")?,
             total_documents: self.count("documents")?,
@@ -623,6 +635,13 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         }
     }
 
+    fn vec_version(&self) -> Result<String> {
+        let version: String = self
+            .conn
+            .query_row("SELECT vec_version()", [], |row| row.get(0))?;
+        Ok(version)
+    }
+
     fn count(&self, table: &str) -> Result<i64> {
         let sql = format!("SELECT COUNT(*) FROM {table}");
         let value = self.conn.query_row(&sql, [], |row| row.get(0))?;
@@ -677,6 +696,25 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         }
         Ok(content)
     }
+}
+
+fn register_vec0_extension() {
+    REGISTER_VEC0.call_once(|| {
+        type SqliteExtInit = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut i8,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> i32;
+
+        // SAFETY: sqlite3_auto_extension expects a C entrypoint pointer with static lifetime.
+        // sqlite3_vec_init is provided by bundled sqlite-vec and remains valid for process life.
+        unsafe {
+            let entrypoint: SqliteExtInit = std::mem::transmute::<*const (), SqliteExtInit>(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            );
+            rusqlite::ffi::sqlite3_auto_extension(Some(entrypoint));
+        }
+    });
 }
 
 fn ensure_parent_dir(db_path: &Path) -> Result<()> {
