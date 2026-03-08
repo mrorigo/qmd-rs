@@ -232,3 +232,50 @@ fn estimate_tokens(line: &str) -> usize {
     let words = line.split_whitespace().count();
     words.max(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{chunk_markdown, ChunkerConfig};
+
+    #[test]
+    fn splits_large_markdown_into_multiple_chunks() {
+        let mut input = String::new();
+        input.push_str("# Title\n\n");
+        for i in 0..120 {
+            input.push_str(&format!(
+                "Paragraph {i} with several words for chunking behavior.\n\n"
+            ));
+        }
+
+        let cfg = ChunkerConfig {
+            target_tokens: 80,
+            overlap_ratio: 0.1,
+            lookback_tokens: 30,
+            code_overshoot_tokens: 50,
+        };
+
+        let chunks = chunk_markdown(&input, cfg);
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.first().map(|c| c.start_line), Some(1));
+    }
+
+    #[test]
+    fn keeps_code_fence_content_in_chunk_output() {
+        let input = "# Doc\n\n```rust\nfn main() {}\n```\n\nTail text.\n";
+        let cfg = ChunkerConfig {
+            target_tokens: 6,
+            overlap_ratio: 0.0,
+            lookback_tokens: 10,
+            code_overshoot_tokens: 50,
+        };
+
+        let chunks = chunk_markdown(input, cfg);
+        let joined = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("```rust"));
+        assert!(joined.contains("fn main() {}"));
+    }
+}

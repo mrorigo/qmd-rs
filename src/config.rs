@@ -246,3 +246,58 @@ fn validate(cfg: &Config) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::load;
+    use crate::cli::{Cli, Commands, StatusArgs};
+    use std::{fs, path::PathBuf};
+    use tempfile::tempdir;
+
+    fn base_cli() -> Cli {
+        Cli {
+            config: None,
+            db_path: None,
+            api_base_url: None,
+            api_key: None,
+            model_embedding: None,
+            model_llm: None,
+            model_reranker: None,
+            command: Commands::Status(StatusArgs {
+                verbose: false,
+                smoke_api: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn applies_file_then_cli_precedence() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let file = r#"
+[api]
+base_url = "http://file.local/v1"
+api_key = "file-key"
+
+[models]
+embedding = "file-embed"
+llm = "file-llm"
+reranker = "file-reranker"
+
+[storage]
+db_path = "file.sqlite"
+"#;
+        fs::write(&config_path, file).expect("write config");
+
+        let mut cli = base_cli();
+        cli.config = Some(config_path);
+        cli.model_llm = Some("cli-llm".to_string());
+        cli.db_path = Some(PathBuf::from("cli.sqlite"));
+
+        let cfg = load(&cli).expect("load config");
+        assert_eq!(cfg.api.base_url, "http://file.local/v1");
+        assert_eq!(cfg.models.embedding, "file-embed");
+        assert_eq!(cfg.models.llm, "cli-llm");
+        assert_eq!(cfg.storage.db_path, PathBuf::from("cli.sqlite"));
+    }
+}

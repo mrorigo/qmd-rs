@@ -686,3 +686,59 @@ fn ensure_parent_dir(db_path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::{
+        cli::{Cli, Commands, StatusArgs},
+        config,
+    };
+    use tempfile::tempdir;
+
+    fn cfg_with_db(path: &std::path::Path) -> config::Config {
+        let cli = Cli {
+            config: None,
+            db_path: Some(path.to_path_buf()),
+            api_base_url: None,
+            api_key: None,
+            model_embedding: None,
+            model_llm: None,
+            model_reranker: None,
+            command: Commands::Status(StatusArgs {
+                verbose: false,
+                smoke_api: false,
+            }),
+        };
+        config::load(&cli).expect("load config")
+    }
+
+    #[test]
+    fn initializes_schema_and_health() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+
+        let db = Database::open(&cfg).expect("open db");
+        let health = db.health_report().expect("health");
+        assert!(health.applied_migrations >= 1);
+        assert!(health.has_documents_fts);
+    }
+
+    #[test]
+    fn collection_and_context_crud_roundtrip() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path()).expect("add collection");
+        let collections = db.list_collections().expect("list collections");
+        assert_eq!(collections.len(), 1);
+
+        db.upsert_context("/tmp", "Temporary files")
+            .expect("add context");
+        let contexts = db.list_contexts().expect("list contexts");
+        assert_eq!(contexts.len(), 1);
+    }
+}
