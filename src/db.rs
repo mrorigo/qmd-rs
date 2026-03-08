@@ -146,6 +146,19 @@ pub struct ChunkEmbedding {
     pub embedding: Vec<f32>,
 }
 
+/// Full document payload resolved from indexed chunks.
+#[derive(Debug, Clone)]
+pub struct DocumentPayload {
+    /// Document id.
+    pub docid: String,
+    /// Document path.
+    pub path: String,
+    /// Optional title.
+    pub title: Option<String>,
+    /// Reconstructed markdown body from stored chunks.
+    pub content: String,
+}
+
 /// SQLite-backed repository and migration manager.
 pub struct Database {
     conn: Connection,
@@ -393,6 +406,98 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         Ok(())
     }
 
+    /// Resolve one document by docid or exact path.
+    pub fn get_document(&self, docid_or_path: &str) -> Result<Option<DocumentPayload>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT docid, path, title FROM documents WHERE docid = ?1 OR path = ?1 LIMIT 1",
+                params![docid_or_path],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        match row {
+            Some((docid, path, title)) => {
+                let content = self.reconstruct_document_content(&docid)?;
+                Ok(Some(DocumentPayload {
+                    docid,
+                    path,
+                    title,
+                    content,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve multiple documents by glob path pattern or comma-separated ids/paths.
+    pub fn multi_get_documents(&self, pattern: &str) -> Result<Vec<DocumentPayload>> {
+        let selectors = pattern
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+
+        if selectors.len() > 1 {
+            let mut out = Vec::new();
+            for selector in selectors {
+                if let Some(doc) = self.get_document(selector)? {
+                    out.push(doc);
+                }
+            }
+            return Ok(out);
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT docid, path, title FROM documents ORDER BY path ASC")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+
+        let matcher = glob::Pattern::new(pattern).ok();
+        let mut out = Vec::new();
+        for row in rows {
+            let (docid, path, title) = row?;
+            let is_match = matcher
+                .as_ref()
+                .map(|m| m.matches(&path))
+                .unwrap_or_else(|| path.contains(pattern) || docid.contains(pattern));
+
+            if is_match {
+                out.push(DocumentPayload {
+                    content: self.reconstruct_document_content(&docid)?,
+                    docid,
+                    path,
+                    title,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return context descriptions associated with a path.
+    pub fn context_descriptions_for_path(&self, path: &str) -> Result<Vec<String>> {
+        let contexts = self.list_contexts()?;
+        let matched = contexts
+            .into_iter()
+            .filter(|ctx| path.starts_with(&ctx.scope))
+            .map(|ctx| ctx.description)
+            .collect::<Vec<_>>();
+        Ok(matched)
+    }
+
     /// Run BM25 search against FTS table.
     pub fn bm25_search(&self, query: &str, limit: usize) -> Result<Vec<Bm25Hit>> {
         let mut stmt = self.conn.prepare(
@@ -555,6 +660,21 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     row.get(0)
                 })?;
         Ok(total as usize)
+    }
+
+    fn reconstruct_document_content(&self, docid: &str) -> Result<String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content FROM content_vectors WHERE docid = ?1 ORDER BY chunk_index ASC",
+        )?;
+        let rows = stmt.query_map(params![docid], |r| r.get::<_, String>(0))?;
+        let mut content = String::new();
+        for row in rows {
+            content.push_str(&row?);
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        Ok(content)
     }
 }
 

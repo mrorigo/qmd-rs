@@ -17,6 +17,8 @@ pub struct SearchResult {
     pub snippet: String,
     /// Final ranking score.
     pub score: f64,
+    /// Matched context descriptions.
+    pub contexts: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,7 @@ pub fn run_bm25_search(db: &Database, query: &str, limit: usize) -> Result<Vec<S
             title: h.title,
             snippet: h.snippet,
             score: 1.0 / (idx as f64 + 1.0),
+            contexts: Vec::new(),
         })
         .collect())
 }
@@ -88,6 +91,7 @@ pub async fn run_vector_search(
                 title: c.title,
                 snippet: c.snippet,
                 score,
+                contexts: Vec::new(),
             })
         })
         .collect::<Vec<_>>();
@@ -179,6 +183,9 @@ pub async fn run_hybrid_query(
         .map(|(idx, c)| {
             let rr = c.source_score;
             let rs = rerank_scores.get(idx).copied().unwrap_or(0.0);
+            let contexts = db
+                .context_descriptions_for_path(&c.path)
+                .unwrap_or_default();
             let (w_rrf, w_rerank) = if idx <= 2 {
                 (0.75, 0.25)
             } else if idx <= 9 {
@@ -193,6 +200,7 @@ pub async fn run_hybrid_query(
                 title: c.title,
                 snippet: c.snippet,
                 score: (rr * w_rrf) + (rs * w_rerank),
+                contexts,
             }
         })
         .collect::<Vec<_>>();

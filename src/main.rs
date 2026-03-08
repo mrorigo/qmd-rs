@@ -94,11 +94,15 @@ async fn main() -> Result<()> {
             let results = search::run_hybrid_query(&cfg, &db, &args.query).await?;
             print_results(&results);
         }
-        Commands::Get(args) => {
-            info!(docid_or_path = %args.docid_or_path, "get command not implemented yet");
-        }
+        Commands::Get(args) => match db.get_document(&args.docid_or_path)? {
+            Some(doc) => print_document(&doc),
+            None => println!("get.not_found selector={}", args.docid_or_path),
+        },
         Commands::MultiGet(args) => {
-            info!(pattern = %args.pattern, "multi-get command not implemented yet");
+            let docs = db.multi_get_documents(&args.pattern)?;
+            for doc in docs {
+                print_document(&doc);
+            }
         }
         Commands::Mcp(args) => {
             info!(
@@ -169,5 +173,18 @@ fn print_results(results: &[search::SearchResult]) {
             result.title.clone().unwrap_or_else(|| "-".to_string())
         );
         println!("snippet={}", compact(&result.snippet));
+        if !result.contexts.is_empty() {
+            println!("contexts={}", result.contexts.join(" | "));
+        }
     }
+}
+
+fn print_document(doc: &db::DocumentPayload) {
+    println!(
+        "document docid={} path={} title={}",
+        doc.docid,
+        doc.path,
+        doc.title.clone().unwrap_or_else(|| "-".to_string())
+    );
+    println!("{}", doc.content.trim_end());
 }
