@@ -29,21 +29,22 @@ impl ApiClient {
         }
     }
 
-    /// Run a minimal embeddings endpoint smoke test.
+    /// Request embeddings for text inputs.
     ///
     /// # Arguments
     /// `model` - Embedding model id.
+    /// `inputs` - Text entries to vectorize.
     ///
     /// # Returns
-    /// `Ok(())` when at least one vector is returned.
+    /// A vector of embeddings in input order.
     ///
     /// # Errors
     /// Returns an error when request or response parsing fails.
-    pub async fn smoke_embeddings(&self, model: &str) -> Result<()> {
+    pub async fn embed_texts(&self, model: &str, inputs: &[&str]) -> Result<Vec<Vec<f32>>> {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let req = EmbeddingRequest {
             model: model.to_string(),
-            input: vec!["qmd smoke test".to_string()],
+            input: inputs.iter().map(|s| (*s).to_string()).collect(),
         };
 
         let response = self
@@ -60,12 +61,34 @@ impl ApiClient {
             .await
             .context("failed to parse embeddings response")?;
 
+        let vectors = response
+            .data
+            .into_iter()
+            .map(|item| item.embedding)
+            .collect::<Vec<_>>();
+
         anyhow::ensure!(
-            !response.data.is_empty(),
-            "embeddings response had no vectors"
+            vectors.len() == inputs.len(),
+            "embedding result length mismatch"
         );
+        Ok(vectors)
+    }
+
+    /// Run a minimal embeddings endpoint smoke test.
+    ///
+    /// # Arguments
+    /// `model` - Embedding model id.
+    ///
+    /// # Returns
+    /// `Ok(())` when at least one vector is returned.
+    ///
+    /// # Errors
+    /// Returns an error when request or response parsing fails.
+    pub async fn smoke_embeddings(&self, model: &str) -> Result<()> {
+        let response = self.embed_texts(model, &["qmd smoke test"]).await?;
+        anyhow::ensure!(!response.is_empty(), "embeddings response had no vectors");
         anyhow::ensure!(
-            !response.data[0].embedding.is_empty(),
+            !response[0].is_empty(),
             "embeddings response vector was empty"
         );
         Ok(())

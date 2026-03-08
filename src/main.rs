@@ -1,9 +1,11 @@
 // Rust guideline compliant 2026-03-08
 
 mod api;
+mod chunker;
 mod cli;
 mod config;
 mod db;
+mod ingest;
 
 use anyhow::Result;
 use clap::Parser;
@@ -73,7 +75,11 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Embed(args) => {
-            info!(force = args.force, "embed command not implemented yet");
+            let summary = ingest::run_embed(&cfg, &db, args.force).await?;
+            println!("embed.scanned_files={}", summary.scanned_files);
+            println!("embed.skipped_files={}", summary.skipped_files);
+            println!("embed.indexed_documents={}", summary.indexed_documents);
+            println!("embed.indexed_chunks={}", summary.indexed_chunks);
         }
         Commands::Search(args) => {
             info!(query = %args.query, "search command not implemented yet");

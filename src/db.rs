@@ -1,6 +1,6 @@
 // Rust guideline compliant 2026-03-08
 
-use crate::config::Config;
+use crate::{chunker::Chunk, config::Config};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -8,9 +8,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_core",
-    r#"
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_core",
+        r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS content_vectors (
     token_count INTEGER,
     start_line INTEGER,
     end_line INTEGER,
+    embedding_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (docid) REFERENCES documents(docid)
 );
@@ -64,7 +66,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
     content
 );
 "#,
-)];
+    ),
+    (
+        "0002_content_vectors_embedding_json",
+        r#"
+ALTER TABLE content_vectors ADD COLUMN embedding_json TEXT;
+"#,
+    ),
+];
 
 /// Collection record.
 #[derive(Debug, Clone)]
@@ -148,12 +157,6 @@ impl Database {
     }
 
     /// Insert or update a collection entry keyed by path.
-    ///
-    /// # Arguments
-    /// `path` - Filesystem directory to index.
-    ///
-    /// # Errors
-    /// Returns an error if the write fails.
     pub fn upsert_collection(&self, path: &Path) -> Result<()> {
         let path_text = path.to_string_lossy();
         self.conn.execute(
@@ -168,15 +171,6 @@ ON CONFLICT(path) DO UPDATE SET updated_at=datetime('now')
     }
 
     /// Remove a collection by exact path.
-    ///
-    /// # Arguments
-    /// `path` - Collection path to remove.
-    ///
-    /// # Returns
-    /// Number of changed rows.
-    ///
-    /// # Errors
-    /// Returns an error if the delete fails.
     pub fn remove_collection(&self, path: &Path) -> Result<usize> {
         let path_text = path.to_string_lossy();
         let changed = self.conn.execute(
@@ -187,16 +181,6 @@ ON CONFLICT(path) DO UPDATE SET updated_at=datetime('now')
     }
 
     /// Rename collection alias.
-    ///
-    /// # Arguments
-    /// `old_name` - Existing alias.
-    /// `new_name` - Replacement alias.
-    ///
-    /// # Returns
-    /// Number of changed rows.
-    ///
-    /// # Errors
-    /// Returns an error if the update fails.
     pub fn rename_collection(&self, old_name: &str, new_name: &str) -> Result<usize> {
         let changed = self.conn.execute(
             "UPDATE collections SET name = ?2, updated_at=datetime('now') WHERE name = ?1",
@@ -206,12 +190,6 @@ ON CONFLICT(path) DO UPDATE SET updated_at=datetime('now')
     }
 
     /// List all collections sorted by insertion order.
-    ///
-    /// # Returns
-    /// A vector of collection records.
-    ///
-    /// # Errors
-    /// Returns an error if the query fails.
     pub fn list_collections(&self) -> Result<Vec<Collection>> {
         let mut stmt = self
             .conn
@@ -230,13 +208,6 @@ ON CONFLICT(path) DO UPDATE SET updated_at=datetime('now')
     }
 
     /// Insert or update a context by scope.
-    ///
-    /// # Arguments
-    /// `scope` - Virtual path namespace.
-    /// `description` - Context description injected at query time.
-    ///
-    /// # Errors
-    /// Returns an error if the write fails.
     pub fn upsert_context(&self, scope: &str, description: &str) -> Result<()> {
         self.conn.execute(
             r#"
@@ -250,15 +221,6 @@ ON CONFLICT(scope) DO UPDATE SET description=excluded.description, updated_at=da
     }
 
     /// Remove a context by scope.
-    ///
-    /// # Arguments
-    /// `scope` - Scope identifier to delete.
-    ///
-    /// # Returns
-    /// Number of changed rows.
-    ///
-    /// # Errors
-    /// Returns an error if the delete fails.
     pub fn remove_context(&self, scope: &str) -> Result<usize> {
         let changed = self
             .conn
@@ -267,12 +229,6 @@ ON CONFLICT(scope) DO UPDATE SET description=excluded.description, updated_at=da
     }
 
     /// List contexts sorted by scope.
-    ///
-    /// # Returns
-    /// A vector of path-context records.
-    ///
-    /// # Errors
-    /// Returns an error if the query fails.
     pub fn list_contexts(&self) -> Result<Vec<PathContext>> {
         let mut stmt = self
             .conn
@@ -289,13 +245,127 @@ ON CONFLICT(scope) DO UPDATE SET description=excluded.description, updated_at=da
             .map_err(anyhow::Error::from)
     }
 
+    /// Return whether a document exists with the same content hash.
+    pub fn is_document_unchanged(&self, path: &Path, content_hash: &str) -> Result<bool> {
+        let path_text = path.to_string_lossy();
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT content_hash FROM documents WHERE path = ?1",
+                params![path_text.as_ref()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(existing.as_deref() == Some(content_hash))
+    }
+
+    /// Upsert document metadata.
+    pub fn upsert_document(
+        &self,
+        docid: &str,
+        collection_id: i64,
+        path: &Path,
+        title: Option<&str>,
+        content_hash: &str,
+        modified_at: Option<String>,
+    ) -> Result<()> {
+        let path_text = path.to_string_lossy();
+        self.conn.execute(
+            r#"
+INSERT INTO documents(docid, collection_id, path, title, content_hash, modified_at, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+ON CONFLICT(path) DO UPDATE SET
+    docid=excluded.docid,
+    collection_id=excluded.collection_id,
+    title=excluded.title,
+    content_hash=excluded.content_hash,
+    modified_at=excluded.modified_at,
+    updated_at=datetime('now')
+"#,
+            params![
+                docid,
+                collection_id,
+                path_text.as_ref(),
+                title,
+                content_hash,
+                modified_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Replace all chunk rows and FTS rows for a document.
+    pub fn replace_document_chunks(
+        &self,
+        docid: &str,
+        path: &Path,
+        chunks: &[Chunk],
+        embeddings: &[Vec<f32>],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            chunks.len() == embeddings.len(),
+            "chunk/embedding length mismatch"
+        );
+
+        self.conn.execute(
+            "DELETE FROM content_vectors WHERE docid = ?1",
+            params![docid],
+        )?;
+        self.conn
+            .execute("DELETE FROM documents_fts WHERE docid = ?1", params![docid])?;
+
+        let title: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT title FROM documents WHERE docid = ?1",
+                params![docid],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        let path_text = path.to_string_lossy();
+        for (index, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+            let hash_seq = format!("{}:{:04}", docid, index);
+            let embedding_json = serde_json::to_string(embedding)?;
+
+            self.conn.execute(
+                r#"
+INSERT INTO content_vectors(
+    hash_seq, docid, chunk_index, content, token_count, start_line, end_line, embedding_json
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+                params![
+                    hash_seq,
+                    docid,
+                    index as i64,
+                    chunk.content,
+                    chunk.token_count as i64,
+                    chunk.start_line as i64,
+                    chunk.end_line as i64,
+                    embedding_json,
+                ],
+            )?;
+
+            self.conn.execute(
+                "INSERT INTO documents_fts(docid, path, title, content) VALUES (?1, ?2, ?3, ?4)",
+                params![docid, path_text.as_ref(), title.as_deref(), chunk.content],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Clear indexed documents and chunk data.
+    pub fn clear_documents_and_chunks(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM documents_fts", [])?;
+        self.conn.execute("DELETE FROM content_vectors", [])?;
+        self.conn.execute("DELETE FROM documents", [])?;
+        Ok(())
+    }
+
     /// Compute status health and index presence.
-    ///
-    /// # Returns
-    /// Database health and table/index counts.
-    ///
-    /// # Errors
-    /// Returns an error if any metadata query fails.
     pub fn health_report(&self) -> Result<HealthReport> {
         let applied_migrations = self.migration_count()?;
         let has_documents_fts = self.has_table("documents_fts")?;
@@ -343,6 +413,16 @@ ON CONFLICT(scope) DO UPDATE SET description=excluded.description, updated_at=da
                 continue;
             }
 
+            if *version == "0002_content_vectors_embedding_json"
+                && self.column_exists("content_vectors", "embedding_json")?
+            {
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, datetime('now'))",
+                    params![version],
+                )?;
+                continue;
+            }
+
             self.conn.execute_batch(sql)?;
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, datetime('now'))",
@@ -382,6 +462,18 @@ ON CONFLICT(scope) DO UPDATE SET description=excluded.description, updated_at=da
             .optional()?
             .is_some();
         Ok(found)
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&pragma)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for row in rows {
+            if row? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn migration_count(&self) -> Result<usize> {
