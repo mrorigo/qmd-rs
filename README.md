@@ -12,18 +12,6 @@ Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engi
 - SQLite + FTS5 core with vector-ready storage
 - Agent-facing tool surface via MCP modes
 
-## Current Phase Status
-
-- Phase 1: foundation + config + API smoke
-- Phase 2: SQLite schema, migrations, health, CRUD
-- Phase 3: ingestion + markdown chunking + incremental embed
-- Phase 4: BM25, vector search, hybrid query (RRF + blend)
-- Phase 5: get/multi-get + context-aware query output
-- Phase 6: MCP server surfaces
-  - `stdio`: full toolset
-  - `http/sse`: SSE heartbeat and `qmd_status` tool endpoint
-- Phase 7: CI + core tests (in progress and improving)
-
 ## Architecture Snapshot
 
 - Language: Rust 2021
@@ -198,18 +186,18 @@ GitHub Actions workflow runs on push and PR:
 - `cargo test --all-targets`
 - `cargo check --all-targets`
 
-See [ci.yml](/Users/origo/src/qmd-rs/.github/workflows/ci.yml).
+See [ci.yml](.github/workflows/ci.yml).
 
 ## Project Structure
 
-- [src/main.rs](/Users/origo/src/qmd-rs/src/main.rs): CLI entrypoint and command dispatch
-- [src/config.rs](/Users/origo/src/qmd-rs/src/config.rs): config loading and validation
-- [src/db.rs](/Users/origo/src/qmd-rs/src/db.rs): migrations and repository operations
-- [src/chunker.rs](/Users/origo/src/qmd-rs/src/chunker.rs): markdown-aware chunking
-- [src/ingest.rs](/Users/origo/src/qmd-rs/src/ingest.rs): embed pipeline
-- [src/search.rs](/Users/origo/src/qmd-rs/src/search.rs): BM25/vector/hybrid retrieval
-- [src/api.rs](/Users/origo/src/qmd-rs/src/api.rs): OpenAI-compatible API calls
-- [src/mcp.rs](/Users/origo/src/qmd-rs/src/mcp.rs): MCP stdio/HTTP server surfaces
+- [src/main.rs](src/main.rs): CLI entrypoint and command dispatch
+- [src/config.rs](src/config.rs): config loading and validation
+- [src/db.rs](src/db.rs): migrations and repository operations
+- [src/chunker.rs](src/chunker.rs): markdown-aware chunking
+- [src/ingest.rs](src/ingest.rs): embed pipeline
+- [src/search.rs](src/search.rs): BM25/vector/hybrid retrieval
+- [src/api.rs](src/api.rs): OpenAI-compatible API calls
+- [src/mcp.rs](src/mcp.rs): MCP stdio/HTTP server surfaces
 
 ## What’s Next
 
