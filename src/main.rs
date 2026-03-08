@@ -87,11 +87,11 @@ async fn main() -> Result<()> {
             print_results(&results);
         }
         Commands::Vsearch(args) => {
-            let results = search::run_vector_search(&cfg, &db, &args.query, 20).await?;
+            let results = search::run_vector_search(&cfg, &args.query, 20).await?;
             print_results(&results);
         }
         Commands::Query(args) => {
-            let results = search::run_hybrid_query(&cfg, &db, &args.query).await?;
+            let results = search::run_hybrid_query(&cfg, &args.query).await?;
             print_results(&results);
         }
         Commands::Get(args) => match db.get_document(&args.docid_or_path)? {

@@ -74,13 +74,13 @@ pub fn run_bm25_search(db: &Database, query: &str, limit: usize) -> Result<Vec<S
 /// Returns an error if API embedding or data loading fails.
 pub async fn run_vector_search(
     cfg: &Config,
-    db: &Database,
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
     let client = ApiClient::from_config(cfg);
     let vectors = client.embed_texts(&cfg.models.embedding, &[query]).await?;
     let query_embedding_json = serde_json::to_string(&vectors[0])?;
+    let db = Database::open(cfg)?;
 
     let mut scored = db
         .vector_search(&query_embedding_json, limit)?
@@ -113,7 +113,6 @@ pub async fn run_vector_search(
 /// Returns an error when retrieval stages fail.
 pub async fn run_hybrid_query(
     cfg: &Config,
-    db: &Database,
     query: &str,
 ) -> Result<Vec<SearchResult>> {
     let client = ApiClient::from_config(cfg);
@@ -135,20 +134,22 @@ pub async fn run_hybrid_query(
 
     let mut all_lists: Vec<Vec<Candidate>> = Vec::new();
     for q in &queries {
-        let bm = db
-            .bm25_search(q, 25)?
-            .into_iter()
-            .map(|h| Candidate {
-                docid: h.docid,
-                path: h.path,
-                title: h.title,
-                snippet: h.snippet,
-                source_score: 0.0,
-            })
-            .collect::<Vec<_>>();
+        let bm = {
+            let db = Database::open(cfg)?;
+            db.bm25_search(q, 25)?
+                .into_iter()
+                .map(|h| Candidate {
+                    docid: h.docid,
+                    path: h.path,
+                    title: h.title,
+                    snippet: h.snippet,
+                    source_score: 0.0,
+                })
+                .collect::<Vec<_>>()
+        };
         all_lists.push(bm);
 
-        let vv = run_vector_search(cfg, db, q, 25)
+        let vv = run_vector_search(cfg, q, 25)
             .await?
             .into_iter()
             .map(|h| Candidate {
@@ -181,8 +182,8 @@ pub async fn run_hybrid_query(
         .map(|(idx, c)| {
             let rr = c.source_score;
             let rs = rerank_scores.get(idx).copied().unwrap_or(0.0);
-            let contexts = db
-                .context_descriptions_for_path(&c.path)
+            let contexts = Database::open(cfg)
+                .and_then(|db| db.context_descriptions_for_path(&c.path))
                 .unwrap_or_default();
             let (w_rrf, w_rerank) = if idx <= 2 {
                 (0.75, 0.25)

@@ -149,12 +149,13 @@ Also includes distance decay and overlap behavior to improve downstream retrieva
 qmd mcp
 ```
 
-Send JSON lines like:
+Send JSON-RPC lines like:
 
 ```json
-{"tool":"qmd_status","args":{}}
-{"tool":"qmd_search","args":{"query":"test"}}
-{"tool":"qmd_get","args":{"selector":"abc123"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"demo","version":"0.1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qmd_search","arguments":{"query":"test"}}}
 ```
 
 Available tools:
@@ -172,10 +173,10 @@ Available tools:
 qmd mcp --http --port 8080
 ```
 
-Endpoints:
+MCP endpoint:
 
-- `GET /events`: SSE heartbeat stream
-- `POST /tool`: supports full toolset (`qmd_search`, `qmd_vector_search`, `qmd_deep_search`, `qmd_get`, `qmd_multi_get`, `qmd_status`)
+- `POST /mcp`: JSON-RPC requests/notifications
+- `GET /mcp`: SSE heartbeat stream
 
 Vector activation visibility:
 
@@ -207,10 +208,8 @@ See [ci.yml](.github/workflows/ci.yml).
 ## What’s Next
 
 - HTTP transport hardening (timeouts/auth/rate limiting) and MCP ergonomics
-- Native `sqlite-vec` query optimization and performance tuning
 - More deterministic reranker parsing and scoring contracts
 - richer tests for ranking math and retrieval regression fixtures
-- MCP protocol conformance polishing with `rmcp`
 
 ## Contributing
 
