@@ -106,6 +106,74 @@ impl ApiClient {
     /// # Errors
     /// Returns an error when request or response parsing fails.
     pub async fn smoke_chat(&self, model: &str, prompt: &str) -> Result<String> {
+        self.chat_completion(model, prompt, Some(0.0), Some(24))
+            .await
+    }
+
+    /// Expand a query into short semantic variants.
+    pub async fn expand_queries(&self, model: &str, query: &str, n: usize) -> Result<Vec<String>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+
+        let prompt = format!(
+            "Generate {n} concise search variants for: {query}. Return one per line, no numbering."
+        );
+        let text = self
+            .chat_completion(model, &prompt, Some(0.0), Some(128))
+            .await?;
+
+        let variants = text
+            .lines()
+            .map(|l| l.trim().trim_start_matches('-').trim().to_string())
+            .filter(|l| !l.is_empty())
+            .take(n)
+            .collect::<Vec<_>>();
+
+        Ok(variants)
+    }
+
+    /// Rerank candidate snippets with an LLM and return normalized scores.
+    pub async fn rerank_candidates(
+        &self,
+        model: &str,
+        query: &str,
+        snippets: &[String],
+    ) -> Result<Vec<f64>> {
+        if snippets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let joined = snippets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("[{}] {}", i + 1, s.replace('\n', " ")))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            "Query: {query}\nCandidates:\n{joined}\nReturn JSON array of relevance scores in [0,1], in the same order."
+        );
+        let raw = self
+            .chat_completion(model, &prompt, Some(0.0), Some(512))
+            .await?;
+
+        let parsed: Vec<f64> =
+            serde_json::from_str(raw.trim()).unwrap_or_else(|_| vec![0.0; snippets.len()]);
+        if parsed.len() == snippets.len() {
+            Ok(parsed)
+        } else {
+            Ok(vec![0.0; snippets.len()])
+        }
+    }
+
+    async fn chat_completion(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+    ) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let req = ChatRequest {
             model: model.to_string(),
@@ -113,8 +181,8 @@ impl ApiClient {
                 role: "user".to_string(),
                 content: prompt.to_string(),
             }],
-            temperature: Some(0.0),
-            max_tokens: Some(24),
+            temperature,
+            max_tokens,
         };
 
         let response = self
@@ -152,7 +220,8 @@ impl ApiClient {
     /// Returns an error when request or response parsing fails.
     pub async fn smoke_reranker(&self, model: &str) -> Result<String> {
         let prompt = "Return only YES if this passage answers the query. Query: qmd smoke. Passage: qmd is a markdown retrieval tool.";
-        self.smoke_chat(model, prompt).await
+        self.chat_completion(model, prompt, Some(0.0), Some(24))
+            .await
     }
 }
 

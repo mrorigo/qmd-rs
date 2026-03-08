@@ -118,6 +118,34 @@ pub struct HealthReport {
     pub total_chunks: i64,
 }
 
+/// BM25 row result.
+#[derive(Debug, Clone)]
+pub struct Bm25Hit {
+    /// Document id.
+    pub docid: String,
+    /// Document path.
+    pub path: String,
+    /// Optional document title.
+    pub title: Option<String>,
+    /// Matched snippet.
+    pub snippet: String,
+}
+
+/// Chunk embedding row for vector search.
+#[derive(Debug, Clone)]
+pub struct ChunkEmbedding {
+    /// Document id.
+    pub docid: String,
+    /// Document path.
+    pub path: String,
+    /// Optional document title.
+    pub title: Option<String>,
+    /// Chunk snippet.
+    pub snippet: String,
+    /// Stored embedding vector.
+    pub embedding: Vec<f32>,
+}
+
 /// SQLite-backed repository and migration manager.
 pub struct Database {
     conn: Connection,
@@ -363,6 +391,50 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         self.conn.execute("DELETE FROM content_vectors", [])?;
         self.conn.execute("DELETE FROM documents", [])?;
         Ok(())
+    }
+
+    /// Run BM25 search against FTS table.
+    pub fn bm25_search(&self, query: &str, limit: usize) -> Result<Vec<Bm25Hit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT docid, path, title, content FROM documents_fts WHERE documents_fts MATCH ?1 ORDER BY bm25(documents_fts) LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![query, limit as i64], |row| {
+            Ok(Bm25Hit {
+                docid: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                snippet: row.get(3)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(anyhow::Error::from)
+    }
+
+    /// Load all chunk embeddings for application-level vector scoring.
+    pub fn load_chunk_embeddings(&self) -> Result<Vec<ChunkEmbedding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT cv.docid, d.path, d.title, cv.content, cv.embedding_json
+             FROM content_vectors cv
+             JOIN documents d ON d.docid = cv.docid
+             WHERE cv.embedding_json IS NOT NULL",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let raw: String = row.get(4)?;
+            let embedding: Vec<f32> = serde_json::from_str(&raw).unwrap_or_default();
+            Ok(ChunkEmbedding {
+                docid: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                snippet: row.get(3)?,
+                embedding,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(anyhow::Error::from)
     }
 
     /// Compute status health and index presence.

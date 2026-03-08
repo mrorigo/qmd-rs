@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod db;
 mod ingest;
+mod search;
 
 use anyhow::Result;
 use clap::Parser;
@@ -82,13 +83,16 @@ async fn main() -> Result<()> {
             println!("embed.indexed_chunks={}", summary.indexed_chunks);
         }
         Commands::Search(args) => {
-            info!(query = %args.query, "search command not implemented yet");
+            let results = search::run_bm25_search(&db, &args.query, 20)?;
+            print_results(&results);
         }
         Commands::Vsearch(args) => {
-            info!(query = %args.query, "vsearch command not implemented yet");
+            let results = search::run_vector_search(&cfg, &db, &args.query, 20).await?;
+            print_results(&results);
         }
         Commands::Query(args) => {
-            info!(query = %args.query, "query command not implemented yet");
+            let results = search::run_hybrid_query(&cfg, &db, &args.query).await?;
+            print_results(&results);
         }
         Commands::Get(args) => {
             info!(docid_or_path = %args.docid_or_path, "get command not implemented yet");
@@ -152,4 +156,18 @@ fn print_status(cfg: &config::Config, health: &db::HealthReport, verbose: bool) 
 
 fn compact(s: &str) -> String {
     s.trim().replace('\n', " ")
+}
+
+fn print_results(results: &[search::SearchResult]) {
+    for (idx, result) in results.iter().enumerate() {
+        println!(
+            "result rank={} score={:.6} docid={} path={} title={}",
+            idx + 1,
+            result.score,
+            result.docid,
+            result.path,
+            result.title.clone().unwrap_or_else(|| "-".to_string())
+        );
+        println!("snippet={}", compact(&result.snippet));
+    }
 }
