@@ -2,10 +2,11 @@
 
 use crate::{api::ApiClient, config::Config, db::Database};
 use anyhow::Result;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 /// Unified search result row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     /// Document id.
     pub docid: String,

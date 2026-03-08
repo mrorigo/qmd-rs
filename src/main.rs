@@ -6,13 +6,13 @@ mod cli;
 mod config;
 mod db;
 mod ingest;
+mod mcp;
 mod search;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, CollectionAction, Commands, ContextAction};
 use db::Database;
-use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,11 +105,11 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Mcp(args) => {
-            info!(
-                http = args.http,
-                port = args.port,
-                "mcp command not implemented yet"
-            );
+            if args.http {
+                mcp::run_http(cfg.clone(), args.port).await?;
+            } else {
+                mcp::run_stdio(cfg.clone()).await?;
+            }
         }
         Commands::Status(args) => {
             let health = db.health_report()?;

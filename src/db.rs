@@ -3,6 +3,7 @@
 use crate::{chunker::Chunk, config::Config};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -96,7 +97,7 @@ pub struct PathContext {
 }
 
 /// Index health summary for status output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HealthReport {
     /// Database file location.
     pub db_path: PathBuf,
@@ -147,7 +148,7 @@ pub struct ChunkEmbedding {
 }
 
 /// Full document payload resolved from indexed chunks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DocumentPayload {
     /// Document id.
     pub docid: String,
