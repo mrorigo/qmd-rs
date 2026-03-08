@@ -80,25 +80,22 @@ pub async fn run_vector_search(
 ) -> Result<Vec<SearchResult>> {
     let client = ApiClient::from_config(cfg);
     let vectors = client.embed_texts(&cfg.models.embedding, &[query]).await?;
-    let query_vec = &vectors[0];
+    let query_embedding_json = serde_json::to_string(&vectors[0])?;
 
-    let chunks = db.load_chunk_embeddings()?;
-    let mut scored = chunks
+    let mut scored = db
+        .vector_search(&query_embedding_json, limit)?
         .into_iter()
-        .filter_map(|c| {
-            cosine_similarity(query_vec, &c.embedding).map(|score| SearchResult {
-                docid: c.docid,
-                path: c.path,
-                title: c.title,
-                snippet: c.snippet,
-                score,
-                contexts: Vec::new(),
-            })
+        .map(|(hit, distance)| SearchResult {
+            docid: hit.docid,
+            path: hit.path,
+            title: hit.title,
+            snippet: hit.snippet,
+            score: 1.0 / (1.0 + distance),
+            contexts: Vec::new(),
         })
         .collect::<Vec<_>>();
 
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-    scored.truncate(limit);
     Ok(scored)
 }
 
@@ -236,28 +233,4 @@ fn rrf_fuse(lists: &[Vec<Candidate>], k: f64) -> Vec<Candidate> {
     }
 
     map.into_values().collect()
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f64> {
-    if a.len() != b.len() || a.is_empty() {
-        return None;
-    }
-
-    let mut dot = 0.0f64;
-    let mut an = 0.0f64;
-    let mut bn = 0.0f64;
-
-    for (x, y) in a.iter().zip(b.iter()) {
-        let xf = *x as f64;
-        let yf = *y as f64;
-        dot += xf * yf;
-        an += xf * xf;
-        bn += yf * yf;
-    }
-
-    if an == 0.0 || bn == 0.0 {
-        return None;
-    }
-
-    Some(dot / (an.sqrt() * bn.sqrt()))
 }

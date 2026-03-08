@@ -135,21 +135,6 @@ pub struct Bm25Hit {
     pub snippet: String,
 }
 
-/// Chunk embedding row for vector search.
-#[derive(Debug, Clone)]
-pub struct ChunkEmbedding {
-    /// Document id.
-    pub docid: String,
-    /// Document path.
-    pub path: String,
-    /// Optional document title.
-    pub title: Option<String>,
-    /// Chunk snippet.
-    pub snippet: String,
-    /// Stored embedding vector.
-    pub embedding: Vec<f32>,
-}
-
 /// Full document payload resolved from indexed chunks.
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentPayload {
@@ -201,6 +186,7 @@ impl Database {
 
         db.run_migrations()?;
         db.ensure_vectors_virtual_table()?;
+        db.vec_version()?;
         Ok(db)
     }
 
@@ -359,6 +345,10 @@ ON CONFLICT(path) DO UPDATE SET
             "DELETE FROM content_vectors WHERE docid = ?1",
             params![docid],
         )?;
+        self.conn.execute(
+            "DELETE FROM vectors_vec WHERE hash_seq LIKE ?1",
+            params![format!("{docid}:%")],
+        )?;
         self.conn
             .execute("DELETE FROM documents_fts WHERE docid = ?1", params![docid])?;
 
@@ -395,6 +385,11 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     embedding_json,
                 ],
             )?;
+            let vector_json = serde_json::to_string(embedding)?;
+            self.conn.execute(
+                "INSERT INTO vectors_vec(hash_seq, embedding) VALUES (?1, ?2)",
+                params![hash_seq, vector_json],
+            )?;
 
             self.conn.execute(
                 "INSERT INTO documents_fts(docid, path, title, content) VALUES (?1, ?2, ?3, ?4)",
@@ -408,6 +403,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
     /// Clear indexed documents and chunk data.
     pub fn clear_documents_and_chunks(&self) -> Result<()> {
         self.conn.execute("DELETE FROM documents_fts", [])?;
+        self.conn.execute("DELETE FROM vectors_vec", [])?;
         self.conn.execute("DELETE FROM content_vectors", [])?;
         self.conn.execute("DELETE FROM documents", [])?;
         Ok(())
@@ -524,25 +520,32 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             .map_err(anyhow::Error::from)
     }
 
-    /// Load all chunk embeddings for application-level vector scoring.
-    pub fn load_chunk_embeddings(&self) -> Result<Vec<ChunkEmbedding>> {
+    /// Run native sqlite-vec search and return matched chunks with distance.
+    pub fn vector_search(
+        &self,
+        query_embedding_json: &str,
+        limit: usize,
+    ) -> Result<Vec<(Bm25Hit, f64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT cv.docid, d.path, d.title, cv.content, cv.embedding_json
-             FROM content_vectors cv
+            "SELECT cv.docid, d.path, d.title, cv.content, vv.distance
+             FROM vectors_vec vv
+             JOIN content_vectors cv ON cv.hash_seq = vv.hash_seq
              JOIN documents d ON d.docid = cv.docid
-             WHERE cv.embedding_json IS NOT NULL",
+             WHERE vv.embedding MATCH ?1
+             ORDER BY vv.distance
+             LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            let raw: String = row.get(4)?;
-            let embedding: Vec<f32> = serde_json::from_str(&raw).unwrap_or_default();
-            Ok(ChunkEmbedding {
-                docid: row.get(0)?,
-                path: row.get(1)?,
-                title: row.get(2)?,
-                snippet: row.get(3)?,
-                embedding,
-            })
+        let rows = stmt.query_map(params![query_embedding_json, limit as i64], |row| {
+            Ok((
+                Bm25Hit {
+                    docid: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    snippet: row.get(3)?,
+                },
+                row.get::<_, f64>(4)?,
+            ))
         })?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -554,13 +557,8 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         let applied_migrations = self.migration_count()?;
         let has_documents_fts = self.has_table("documents_fts")?;
         let has_vectors_vec = self.has_table("vectors_vec")?;
-        let native_vec = self.vec_version().is_ok();
-
-        let vectors_note = if has_vectors_vec && native_vec {
-            None
-        } else {
-            Some("sqlite-vec native path inactive; using JSON embedding fallback path".to_string())
-        };
+        let vec_version = self.vec_version()?;
+        let vectors_note = Some(format!("sqlite-vec active ({vec_version})"));
 
         Ok(HealthReport {
             db_path: self.db_path.clone(),
@@ -568,11 +566,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             has_documents_fts,
             has_vectors_vec,
             vectors_note,
-            vector_mode: if has_vectors_vec && native_vec {
-                "native-sqlite-vec".to_string()
-            } else {
-                "fallback-json-cosine".to_string()
-            },
+            vector_mode: "native-sqlite-vec".to_string(),
             total_collections: self.count("collections")?,
             total_contexts: self.count("path_contexts")?,
             total_documents: self.count("documents")?,
@@ -623,16 +617,10 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
     }
 
     fn ensure_vectors_virtual_table(&self) -> Result<()> {
-        if self.has_table("vectors_vec")? {
-            return Ok(());
-        }
-
-        match self.conn.execute_batch(
+        self.conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding FLOAT[1536]);",
-        ) {
-            Ok(_) => Ok(()),
-            Err(_) => Ok(()),
-        }
+        )?;
+        Ok(())
     }
 
     fn vec_version(&self) -> Result<String> {
