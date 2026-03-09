@@ -111,10 +111,7 @@ pub async fn run_vector_search(
 ///
 /// # Errors
 /// Returns an error when retrieval stages fail.
-pub async fn run_hybrid_query(
-    cfg: &Config,
-    query: &str,
-) -> Result<Vec<SearchResult>> {
+pub async fn run_hybrid_query(cfg: &Config, query: &str) -> Result<Vec<SearchResult>> {
     let client = ApiClient::from_config(cfg);
 
     let mut queries = vec![query.to_string()];

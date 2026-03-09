@@ -159,12 +159,12 @@ Environment variable overrides:
 ### Scope
 
 - Implement MCP tool handlers:
-  - `qmd_search`
-  - `qmd_vector_search`
-  - `qmd_deep_search`
-  - `qmd_get`
-  - `qmd_multi_get`
-  - `qmd_status`
+  - `search`
+  - `vector_search`
+  - `deep_search`
+  - `get`
+  - `multi_get`
+  - `status`
 - Support transports: stdio and HTTP/SSE.
 
 ### Deliverables

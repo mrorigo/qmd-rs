@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::post,
     Json, Router,
 };
@@ -41,6 +44,8 @@ struct ToolDef {
     description: &'static str,
     #[serde(rename = "inputSchema")]
     input_schema: Value,
+    #[serde(rename = "outputSchema")]
+    output_schema: Value,
 }
 
 /// Run MCP server in stdio mode.
@@ -59,7 +64,9 @@ pub async fn run_stdio(cfg: Config) -> Result<()> {
             Ok(v) => v,
             Err(err) => {
                 let resp = jsonrpc_error(Value::Null, PARSE_ERROR, &format!("parse error: {err}"));
-                stdout.write_all(serde_json::to_string(&resp)?.as_bytes()).await?;
+                stdout
+                    .write_all(serde_json::to_string(&resp)?.as_bytes())
+                    .await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
                 continue;
@@ -68,7 +75,9 @@ pub async fn run_stdio(cfg: Config) -> Result<()> {
 
         if let Some(id) = parsed.get("id").cloned() {
             let response = handle_request(&cfg, initialized, &parsed, id).await;
-            stdout.write_all(serde_json::to_string(&response)?.as_bytes()).await?;
+            stdout
+                .write_all(serde_json::to_string(&response)?.as_bytes())
+                .await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
         } else {
@@ -161,7 +170,10 @@ async fn handle_request(cfg: &Config, initialized: bool, payload: &Value, id: Va
                 Some(v) if !v.trim().is_empty() => v,
                 _ => return jsonrpc_error(id, INVALID_PARAMS, "missing tools/call.params.name"),
             };
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
 
             match execute_tool_call(cfg, name, args).await {
                 Ok(result) => jsonrpc_result(id, result),
@@ -186,75 +198,163 @@ fn handle_notification_stdio(initialized: &mut bool, payload: &Value) {
 
 async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Value> {
     let structured = match name {
-        "qmd_search" => {
+        "search" => {
             let query = required_string(&args, "query")?;
             let db = Database::open(cfg)?;
             serde_json::to_value(search::run_bm25_search(&db, query, 20)?)?
         }
-        "qmd_vector_search" => {
+        "vector_search" => {
             let query = required_string(&args, "query")?;
             serde_json::to_value(search::run_vector_search(cfg, query, 20).await?)?
         }
-        "qmd_deep_search" => {
+        "deep_search" => {
             let query = required_string(&args, "query")?;
             serde_json::to_value(search::run_hybrid_query(cfg, query).await?)?
         }
-        "qmd_get" => {
+        "get" => {
             let selector = required_string(&args, "selector")?;
             let db = Database::open(cfg)?;
             serde_json::to_value(db.get_document(selector)?)?
         }
-        "qmd_multi_get" => {
+        "multi_get" => {
             let pattern = required_string(&args, "pattern")?;
             let db = Database::open(cfg)?;
             serde_json::to_value(db.multi_get_documents(pattern)?)?
         }
-        "qmd_status" => {
+        "status" => {
             let db = Database::open(cfg)?;
             serde_json::to_value(db.health_report()?)?
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     };
+    let structured_content = normalize_structured_content(structured);
 
     Ok(json!({
         "content": [
-            {"type": "text", "text": serde_json::to_string_pretty(&structured)?}
+            {"type": "text", "text": serde_json::to_string_pretty(&structured_content)?}
         ],
-        "structuredContent": structured
+        "structuredContent": structured_content
     }))
 }
 
+fn normalize_structured_content(value: Value) -> Value {
+    match value {
+        Value::Object(_) => value,
+        Value::Array(items) => json!({ "results": items }),
+        scalar => json!({ "value": scalar }),
+    }
+}
+
 fn mcp_tools() -> Vec<ToolDef> {
+    let search_result_schema = json!({
+        "type": "object",
+        "properties": {
+            "docid": { "type": "string" },
+            "path": { "type": "string" },
+            "title": { "type": ["string", "null"] },
+            "snippet": { "type": "string" },
+            "score": { "type": "number" },
+            "contexts": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["docid", "path", "title", "snippet", "score", "contexts"]
+    });
+    let search_results_schema = json!({
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": search_result_schema
+            }
+        },
+        "required": ["results"]
+    });
+    let document_payload_schema = json!({
+        "type": "object",
+        "properties": {
+            "docid": { "type": "string" },
+            "path": { "type": "string" },
+            "title": { "type": ["string", "null"] },
+            "content": { "type": "string" }
+        },
+        "required": ["docid", "path", "title", "content"]
+    });
+    let multi_get_schema = json!({
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": document_payload_schema
+            }
+        },
+        "required": ["results"]
+    });
+    let status_schema = json!({
+        "type": "object",
+        "properties": {
+            "db_path": { "type": "string" },
+            "applied_migrations": { "type": "integer" },
+            "has_documents_fts": { "type": "boolean" },
+            "has_vectors_vec": { "type": "boolean" },
+            "vectors_note": { "type": ["string", "null"] },
+            "vector_mode": { "type": "string" },
+            "total_collections": { "type": "integer" },
+            "total_contexts": { "type": "integer" },
+            "total_documents": { "type": "integer" },
+            "total_chunks": { "type": "integer" }
+        },
+        "required": [
+            "db_path",
+            "applied_migrations",
+            "has_documents_fts",
+            "has_vectors_vec",
+            "vectors_note",
+            "vector_mode",
+            "total_collections",
+            "total_contexts",
+            "total_documents",
+            "total_chunks"
+        ]
+    });
+
     vec![
         ToolDef {
-            name: "qmd_search",
+            name: "search",
             description: "Execute BM25 keyword search.",
             input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            output_schema: search_results_schema.clone(),
         },
         ToolDef {
-            name: "qmd_vector_search",
+            name: "vector_search",
             description: "Execute semantic vector search.",
             input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            output_schema: search_results_schema.clone(),
         },
         ToolDef {
-            name: "qmd_deep_search",
+            name: "deep_search",
             description: "Execute hybrid deep search.",
             input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            output_schema: search_results_schema,
         },
         ToolDef {
-            name: "qmd_get",
+            name: "get",
             description: "Retrieve one document by selector.",
             input_schema: json!({"type":"object","properties":{"selector":{"type":"string"}},"required":["selector"]}),
+            output_schema: document_payload_schema,
         },
         ToolDef {
-            name: "qmd_multi_get",
+            name: "multi_get",
             description: "Retrieve multiple documents by pattern.",
             input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}),
+            output_schema: multi_get_schema,
         },
         ToolDef {
-            name: "qmd_status",
+            name: "status",
             description: "Return index health and metadata.",
             input_schema: json!({"type":"object","properties":{}}),
+            output_schema: status_schema,
         },
     ]
 }
@@ -272,4 +372,103 @@ fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required string argument: {key}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{execute_tool_call, mcp_tools};
+    use crate::{
+        chunker::Chunk,
+        cli::{Cli, Commands, StatusArgs},
+        config,
+        db::Database,
+    };
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn cfg_with_db(path: &std::path::Path) -> config::Config {
+        let cli = Cli {
+            config: None,
+            db_path: Some(path.to_path_buf()),
+            api_base_url: None,
+            api_key: None,
+            model_embedding: None,
+            model_llm: None,
+            model_reranker: None,
+            command: Commands::Status(StatusArgs {
+                verbose: false,
+                smoke_api: false,
+            }),
+        };
+        config::load(&cli).expect("load config")
+    }
+
+    #[tokio::test]
+    async fn wraps_search_results_in_structured_content_object() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path()).expect("add collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        let doc_path = dir.path().join("metrics.md");
+        db.upsert_document(
+            "doc-1",
+            collection.id,
+            &doc_path,
+            Some("Company Metrics"),
+            "hash-1",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-1",
+            &doc_path,
+            &[Chunk {
+                content: "company metrics status green".to_string(),
+                token_count: 4,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; 1536]],
+        )
+        .expect("replace chunks");
+
+        let result = execute_tool_call(&cfg, "search", json!({ "query": "company metrics" }))
+            .await
+            .expect("execute search");
+
+        let structured = result
+            .get("structuredContent")
+            .and_then(serde_json::Value::as_object)
+            .expect("structured content object");
+        let results = structured
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .expect("results array");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["docid"], "doc-1");
+    }
+
+    #[test]
+    fn exposes_output_schema_for_search_tool() {
+        let tool = mcp_tools()
+            .into_iter()
+            .find(|tool| tool.name == "search")
+            .expect("search tool");
+
+        assert_eq!(tool.output_schema["type"], "object");
+        assert_eq!(tool.output_schema["required"], json!(["results"]));
+        assert_eq!(
+            tool.output_schema["properties"]["results"]["type"],
+            json!("array")
+        );
+    }
 }

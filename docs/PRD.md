@@ -80,12 +80,12 @@ The system must expose itself as an MCP server using `rmcp`. This allows agents 
 
 **Required MCP Tools:**
 
-* `qmd_search`: Execute fast BM25 keyword searches (supports collection filtering).
-* `qmd_vector_search`: Execute semantic vector searches.
-* `qmd_deep_search`: Execute the full hybrid pipeline (expansion + FTS + Vector + reranking).
-* `qmd_get`: Retrieve a full document by path or 6-character document hash (docid).
-* `qmd_multi_get`: Retrieve multiple documents by glob pattern or list of docids.
-* `qmd_status`: Return index health, total documents, and collection metadata.
+* `search`: Execute fast BM25 keyword searches (supports collection filtering).
+* `vector_search`: Execute semantic vector searches.
+* `deep_search`: Execute the full hybrid pipeline (expansion + FTS + Vector + reranking).
+* `get`: Retrieve a full document by path or 6-character document hash (docid).
+* `multi_get`: Retrieve multiple documents by glob pattern or list of docids.
+* `status`: Return index health, total documents, and collection metadata.
 
 **Transports:**
 

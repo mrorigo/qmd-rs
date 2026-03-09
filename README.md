@@ -155,17 +155,17 @@ Send JSON-RPC lines like:
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"demo","version":"0.1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qmd_search","arguments":{"query":"test"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"test"}}}
 ```
 
 Available tools:
 
-- `qmd_search`
-- `qmd_vector_search`
-- `qmd_deep_search`
-- `qmd_get`
-- `qmd_multi_get`
-- `qmd_status`
+- `search`
+- `vector_search`
+- `deep_search`
+- `get`
+- `multi_get`
+- `status`
 
 ### HTTP/SSE Mode
 
