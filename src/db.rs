@@ -503,11 +503,12 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 
     /// Run BM25 search against FTS table.
     pub fn bm25_search(&self, query: &str, limit: usize) -> Result<Vec<Bm25Hit>> {
+        let match_query = build_fts5_match_query(query);
         let mut stmt = self.conn.prepare(
             "SELECT docid, path, title, content FROM documents_fts WHERE documents_fts MATCH ?1 ORDER BY bm25(documents_fts) LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![query, limit as i64], |row| {
+        let rows = stmt.query_map(params![match_query, limit as i64], |row| {
             Ok(Bm25Hit {
                 docid: row.get(0)?,
                 path: row.get(1)?,
@@ -532,8 +533,8 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              JOIN content_vectors cv ON cv.hash_seq = vv.hash_seq
              JOIN documents d ON d.docid = cv.docid
              WHERE vv.embedding MATCH ?1
-             ORDER BY vv.distance
-             LIMIT ?2",
+               AND k = ?2
+             ORDER BY vv.distance",
         )?;
 
         let rows = stmt.query_map(params![query_embedding_json, limit as i64], |row| {
@@ -713,13 +714,33 @@ fn ensure_parent_dir(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn build_fts5_match_query(query: &str) -> String {
+    let tokens = query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+        .map(escape_fts5_phrase_token)
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return "\"\"".to_string();
+    }
+
+    tokens.join(" AND ")
+}
+
+fn escape_fts5_phrase_token(token: &str) -> String {
+    format!("\"{}\"", token.replace('"', "\"\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::Database;
     use crate::{
+        chunker::Chunk,
         cli::{Cli, Commands, StatusArgs},
         config,
     };
+    use serde_json::json;
     use tempfile::tempdir;
 
     fn cfg_with_db(path: &std::path::Path) -> config::Config {
@@ -766,5 +787,100 @@ mod tests {
             .expect("add context");
         let contexts = db.list_contexts().expect("list contexts");
         assert_eq!(contexts.len(), 1);
+    }
+
+    #[test]
+    fn bm25_search_handles_hyphenated_and_symbol_queries() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path()).expect("add collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        let doc_path = dir.path().join("scan.md");
+        db.upsert_document(
+            "doc-fts",
+            collection.id,
+            &doc_path,
+            Some("Environmental Metrics Scan"),
+            "hash-fts",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-fts",
+            &doc_path,
+            &[Chunk {
+                content: "Environmental Metrics Scan".to_string(),
+                token_count: 3,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; 1536]],
+        )
+        .expect("replace chunks");
+
+        let with_symbols = db
+            .bm25_search("Environmental & Metrics Scan", 10)
+            .expect("search with symbols");
+        let with_hyphens = db
+            .bm25_search("Environmental-&-Metrics-Scan", 10)
+            .expect("search with hyphens");
+
+        assert_eq!(with_symbols.len(), 1);
+        assert_eq!(with_hyphens.len(), 1);
+        assert_eq!(with_symbols[0].docid, "doc-fts");
+        assert_eq!(with_hyphens[0].docid, "doc-fts");
+    }
+
+    #[test]
+    fn vector_search_uses_portable_knn_syntax() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path()).expect("add collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        let doc_path = dir.path().join("vector.md");
+        db.upsert_document(
+            "doc-vec",
+            collection.id,
+            &doc_path,
+            Some("Vector Match"),
+            "hash-vec",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-vec",
+            &doc_path,
+            &[Chunk {
+                content: "vector content".to_string(),
+                token_count: 2,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; 1536]],
+        )
+        .expect("replace chunks");
+
+        let results = db
+            .vector_search(&json!(vec![0.0_f32; 1536]).to_string(), 1)
+            .expect("vector search");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.docid, "doc-vec");
     }
 }
