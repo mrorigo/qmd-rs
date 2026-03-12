@@ -214,7 +214,10 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
         "get" => {
             let selector = required_string(&args, "selector")?;
             let db = Database::open(cfg)?;
-            serde_json::to_value(db.get_document(selector)?)?
+            let doc = db
+                .get_document(selector)?
+                .ok_or_else(|| anyhow::anyhow!("document not found for selector: {selector}"))?;
+            serde_json::to_value(doc)?
         }
         "multi_get" => {
             let pattern = required_string(&args, "pattern")?;
@@ -455,6 +458,23 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["docid"], "doc-1");
+    }
+
+    #[tokio::test]
+    async fn get_returns_error_when_selector_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+
+        let err = execute_tool_call(&cfg, "get", json!({ "selector": "missing.md" }))
+            .await
+            .expect_err("missing selector should error");
+
+        assert!(
+            err.to_string()
+                .contains("document not found for selector: missing.md"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
