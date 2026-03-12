@@ -504,6 +504,21 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
     /// Run BM25 search against FTS table.
     pub fn bm25_search(&self, query: &str, limit: usize) -> Result<Vec<Bm25Hit>> {
         let match_query = build_fts5_match_query(query);
+        match self.run_bm25_match_query(&match_query, limit) {
+            Ok(results) => Ok(results),
+            Err(primary_err) => {
+                let fallback_query = build_fts5_fallback_phrase_query(query);
+                self.run_bm25_match_query(&fallback_query, limit)
+                    .with_context(|| {
+                        format!(
+                            "bm25 search failed for primary query {match_query:?} and fallback {fallback_query:?}: {primary_err}"
+                        )
+                    })
+            }
+        }
+    }
+
+    fn run_bm25_match_query(&self, match_query: &str, limit: usize) -> Result<Vec<Bm25Hit>> {
         let mut stmt = self.conn.prepare(
             "SELECT docid, path, title, content FROM documents_fts WHERE documents_fts MATCH ?1 ORDER BY bm25(documents_fts) LIMIT ?2",
         )?;
@@ -732,6 +747,20 @@ fn escape_fts5_phrase_token(token: &str) -> String {
     format!("\"{}\"", token.replace('"', "\"\""))
 }
 
+fn build_fts5_fallback_phrase_query(query: &str) -> String {
+    let normalized = query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if normalized.is_empty() {
+        "\"\"".to_string()
+    } else {
+        escape_fts5_phrase_token(&normalized)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Database;
@@ -740,6 +769,7 @@ mod tests {
         cli::{Cli, Commands, StatusArgs},
         config,
     };
+    use rusqlite::params;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -882,5 +912,103 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.docid, "doc-vec");
+    }
+
+    #[test]
+    fn raw_fts_match_with_hyphen_can_raise_no_such_column() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path()).expect("upsert collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection");
+        let doc_path = dir.path().join("specs").join("panic-to-plan-spec.md");
+        db.upsert_document(
+            "doc-hyphen",
+            collection.id,
+            &doc_path,
+            Some("panic to plan"),
+            "hash-hyphen",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-hyphen",
+            &doc_path,
+            &[Chunk {
+                content: "panic to plan spec".to_string(),
+                token_count: 4,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; 1536]],
+        )
+        .expect("replace chunks");
+
+        let err = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM documents_fts WHERE documents_fts MATCH ?1",
+                params!["panic-to-plan-spec.md"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect_err("raw MATCH with hyphenated selector should fail");
+
+        assert!(
+            err.to_string().contains("no such column: to"),
+            "unexpected sqlite error: {err}"
+        );
+    }
+
+    #[test]
+    fn bm25_search_handles_selector_like_hyphenated_queries() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path()).expect("upsert collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection");
+        let doc_path = dir.path().join("specs").join("panic-to-plan-spec.md");
+        db.upsert_document(
+            "doc-hyphen",
+            collection.id,
+            &doc_path,
+            Some("panic to plan"),
+            "hash-hyphen",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-hyphen",
+            &doc_path,
+            &[Chunk {
+                content: "panic to plan spec".to_string(),
+                token_count: 4,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; 1536]],
+        )
+        .expect("replace chunks");
+
+        let results = db
+            .bm25_search("specs/panic-to-plan-spec.md", 10)
+            .expect("bm25 search should not fail");
+        assert!(
+            !results.is_empty(),
+            "bm25 search should return at least one result"
+        );
     }
 }
