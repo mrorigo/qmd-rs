@@ -120,6 +120,47 @@ qmd get abc123
 qmd multi-get "/path/to/notes/*.md"
 ```
 
+## Path Contexts (`qmd context`)
+
+Path contexts let you attach human-readable metadata to path prefixes. During hybrid query (`qmd query`), matched context descriptions are included in result output as `contexts=...`.
+
+When a document path starts with a context `scope`, that context is considered a match.
+
+Commands:
+
+```bash
+qmd context add <scope> <description>
+qmd context rm <scope>
+qmd context list
+```
+
+Examples:
+
+```bash
+# Add or update contexts
+qmd context add /Users/alice/notes/work "Work docs: projects, architecture, ADRs"
+qmd context add /Users/alice/notes/personal "Personal notes: journaling and planning"
+
+# View configured scopes
+qmd context list
+
+# Remove a scope
+qmd context rm /Users/alice/notes/personal
+```
+
+Typical workflow:
+
+1. Add one or more collections with `qmd collection add ...`.
+2. Add contexts for important subtrees (for example `/notes/work` and `/notes/runbooks`).
+3. Run `qmd embed` to index markdown.
+4. Run `qmd query "..."` and inspect the `contexts=...` line per result.
+
+Notes:
+
+- `qmd context add` is an upsert: adding an existing scope updates its description.
+- Use absolute path prefixes for predictable matching.
+- Contexts are attached to search result output for `qmd search`, `qmd vsearch`, and `qmd query`.
+
 ## Search Pipeline (Hybrid)
 
 `qmd query` currently performs:

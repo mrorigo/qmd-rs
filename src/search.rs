@@ -1,6 +1,10 @@
 // Rust guideline compliant 2026-03-08
 
-use crate::{api::ApiClient, config::Config, db::Database};
+use crate::{
+    api::ApiClient,
+    config::Config,
+    db::{Database, PathContext},
+};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -45,7 +49,8 @@ struct Candidate {
 /// Returns an error if the SQL query fails.
 pub fn run_bm25_search(db: &Database, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     let hits = db.bm25_search(query, limit)?;
-    Ok(hits
+    let contexts = db.list_contexts()?;
+    let mut results = hits
         .into_iter()
         .enumerate()
         .map(|(idx, h)| SearchResult {
@@ -56,7 +61,9 @@ pub fn run_bm25_search(db: &Database, query: &str, limit: usize) -> Result<Vec<S
             score: 1.0 / (idx as f64 + 1.0),
             contexts: Vec::new(),
         })
-        .collect())
+        .collect::<Vec<_>>();
+    attach_contexts(&mut results, &contexts);
+    Ok(results)
 }
 
 /// Execute vector similarity search over stored chunk embeddings.
@@ -81,6 +88,7 @@ pub async fn run_vector_search(
     let vectors = client.embed_texts(&cfg.models.embedding, &[query]).await?;
     let query_embedding_json = serde_json::to_string(&vectors[0])?;
     let db = Database::open(cfg)?;
+    let contexts = db.list_contexts()?;
 
     let mut scored = db
         .vector_search(&query_embedding_json, limit)?
@@ -95,6 +103,7 @@ pub async fn run_vector_search(
         })
         .collect::<Vec<_>>();
 
+    attach_contexts(&mut scored, &contexts);
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(scored)
 }
@@ -172,6 +181,8 @@ pub async fn run_hybrid_query(cfg: &Config, query: &str) -> Result<Vec<SearchRes
         )
         .await
         .unwrap_or_else(|_| vec![0.0; fused.len()]);
+    let db = Database::open(cfg)?;
+    let contexts = db.list_contexts()?;
 
     let mut blended = fused
         .into_iter()
@@ -179,9 +190,7 @@ pub async fn run_hybrid_query(cfg: &Config, query: &str) -> Result<Vec<SearchRes
         .map(|(idx, c)| {
             let rr = c.source_score;
             let rs = rerank_scores.get(idx).copied().unwrap_or(0.0);
-            let contexts = Database::open(cfg)
-                .and_then(|db| db.context_descriptions_for_path(&c.path))
-                .unwrap_or_default();
+            let item_contexts = contexts_for_path(&c.path, &contexts);
             let (w_rrf, w_rerank) = if idx <= 2 {
                 (0.75, 0.25)
             } else if idx <= 9 {
@@ -196,7 +205,7 @@ pub async fn run_hybrid_query(cfg: &Config, query: &str) -> Result<Vec<SearchRes
                 title: c.title,
                 snippet: c.snippet,
                 score: (rr * w_rrf) + (rs * w_rerank),
-                contexts,
+                contexts: item_contexts,
             }
         })
         .collect::<Vec<_>>();
@@ -231,4 +240,45 @@ fn rrf_fuse(lists: &[Vec<Candidate>], k: f64) -> Vec<Candidate> {
     }
 
     map.into_values().collect()
+}
+
+fn attach_contexts(results: &mut [SearchResult], contexts: &[PathContext]) {
+    for result in results {
+        result.contexts = contexts_for_path(&result.path, contexts);
+    }
+}
+
+fn contexts_for_path(path: &str, contexts: &[PathContext]) -> Vec<String> {
+    contexts
+        .iter()
+        .filter(|ctx| path.starts_with(&ctx.scope))
+        .map(|ctx| ctx.description.clone())
+        .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contexts_for_path;
+    use crate::db::PathContext;
+
+    #[test]
+    fn contexts_for_path_matches_prefix_scopes() {
+        let contexts = vec![
+            PathContext {
+                scope: "/notes".to_string(),
+                description: "Notes".to_string(),
+            },
+            PathContext {
+                scope: "/notes/work".to_string(),
+                description: "Work".to_string(),
+            },
+            PathContext {
+                scope: "/tmp".to_string(),
+                description: "Temp".to_string(),
+            },
+        ];
+
+        let matched = contexts_for_path("/notes/work/adr.md", &contexts);
+        assert_eq!(matched, vec!["Notes".to_string(), "Work".to_string()]);
+    }
 }

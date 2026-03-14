@@ -544,17 +544,6 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         Ok(out)
     }
 
-    /// Return context descriptions associated with a path.
-    pub fn context_descriptions_for_path(&self, path: &str) -> Result<Vec<String>> {
-        let contexts = self.list_contexts()?;
-        let matched = contexts
-            .into_iter()
-            .filter(|ctx| path.starts_with(&ctx.scope))
-            .map(|ctx| ctx.description)
-            .collect::<Vec<_>>();
-        Ok(matched)
-    }
-
     /// Run BM25 search against FTS table.
     pub fn bm25_search(&self, query: &str, limit: usize) -> Result<Vec<Bm25Hit>> {
         let match_query = build_fts5_match_query(query);
