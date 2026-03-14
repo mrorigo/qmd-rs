@@ -77,7 +77,28 @@ pub struct CollectionCommand {
 #[derive(Debug, Subcommand)]
 pub enum CollectionAction {
     /// Add a collection path.
-    Add { path: PathBuf },
+    Add {
+        /// Filesystem path to register as a collection root.
+        path: PathBuf,
+        /// Optional human-friendly collection alias.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional include glob for files under this collection.
+        #[arg(long)]
+        include_glob: Option<String>,
+        /// Optional exclude glob for files under this collection.
+        #[arg(long)]
+        exclude_glob: Option<String>,
+        /// Clear any existing collection alias on update.
+        #[arg(long)]
+        clear_name: bool,
+        /// Clear any existing include glob on update.
+        #[arg(long)]
+        clear_include_glob: bool,
+        /// Clear any existing exclude glob on update.
+        #[arg(long)]
+        clear_exclude_glob: bool,
+    },
     /// Remove a collection path.
     Remove { path: PathBuf },
     /// List collections.
@@ -156,4 +177,50 @@ pub struct StatusArgs {
     /// Execute API smoke checks.
     #[arg(long)]
     pub smoke_api: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, CollectionAction, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn parses_collection_add_with_schema_fields() {
+        let cli = Cli::parse_from([
+            "qmd",
+            "collection",
+            "add",
+            "/tmp/notes",
+            "--name",
+            "notes",
+            "--include-glob",
+            "**/*.md",
+            "--exclude-glob",
+            "**/.git/**",
+        ]);
+
+        match cli.command {
+            Commands::Collection(cmd) => match cmd.action {
+                CollectionAction::Add {
+                    path,
+                    name,
+                    include_glob,
+                    exclude_glob,
+                    clear_name,
+                    clear_include_glob,
+                    clear_exclude_glob,
+                } => {
+                    assert_eq!(path.to_string_lossy(), "/tmp/notes");
+                    assert_eq!(name.as_deref(), Some("notes"));
+                    assert_eq!(include_glob.as_deref(), Some("**/*.md"));
+                    assert_eq!(exclude_glob.as_deref(), Some("**/.git/**"));
+                    assert!(!clear_name);
+                    assert!(!clear_include_glob);
+                    assert!(!clear_exclude_glob);
+                }
+                _ => panic!("expected collection add action"),
+            },
+            _ => panic!("expected collection command"),
+        }
+    }
 }

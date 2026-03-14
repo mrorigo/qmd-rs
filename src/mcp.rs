@@ -384,7 +384,7 @@ mod tests {
         chunker::Chunk,
         cli::{Cli, Commands, StatusArgs},
         config,
-        db::Database,
+        db::{CollectionUpsert, Database},
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -413,7 +413,8 @@ mod tests {
         let cfg = cfg_with_db(&db_path);
         let db = Database::open(&cfg).expect("open db");
 
-        db.upsert_collection(dir.path()).expect("add collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("add collection");
         let collection = db
             .list_collections()
             .expect("list collections")

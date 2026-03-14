@@ -69,6 +69,14 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
             if !is_markdown(entry.path()) {
                 continue;
             }
+            if !matches_collection_filters(
+                entry.path(),
+                collection_path,
+                collection.include_glob.as_deref(),
+                collection.exclude_glob.as_deref(),
+            )? {
+                continue;
+            }
 
             summary.scanned_files = summary.scanned_files.saturating_add(1);
             let path = entry.path();
@@ -111,6 +119,39 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
     }
 
     Ok(summary)
+}
+
+fn matches_collection_filters(
+    path: &Path,
+    collection_root: &Path,
+    include_glob: Option<&str>,
+    exclude_glob: Option<&str>,
+) -> Result<bool> {
+    let relative = path.strip_prefix(collection_root).unwrap_or(path);
+    let path_text = path.to_string_lossy();
+    let relative_text = relative.to_string_lossy();
+
+    if let Some(glob_text) = include_glob {
+        let include_pattern = glob::Pattern::new(glob_text)
+            .with_context(|| format!("invalid include glob pattern: {glob_text}"))?;
+        let include_match = include_pattern.matches(path_text.as_ref())
+            || include_pattern.matches(relative_text.as_ref());
+        if !include_match {
+            return Ok(false);
+        }
+    }
+
+    if let Some(glob_text) = exclude_glob {
+        let exclude_pattern = glob::Pattern::new(glob_text)
+            .with_context(|| format!("invalid exclude glob pattern: {glob_text}"))?;
+        let exclude_match = exclude_pattern.matches(path_text.as_ref())
+            || exclude_pattern.matches(relative_text.as_ref());
+        if exclude_match {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 fn is_markdown(path: &Path) -> bool {

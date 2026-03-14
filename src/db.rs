@@ -86,6 +86,27 @@ pub struct Collection {
     pub name: Option<String>,
     /// Filesystem path.
     pub path: String,
+    /// Optional file include glob.
+    pub include_glob: Option<String>,
+    /// Optional file exclude glob.
+    pub exclude_glob: Option<String>,
+}
+
+/// Collection upsert payload.
+#[derive(Debug, Clone, Default)]
+pub struct CollectionUpsert {
+    /// Optional alias update value.
+    pub name: Option<String>,
+    /// Optional include glob update value.
+    pub include_glob: Option<String>,
+    /// Optional exclude glob update value.
+    pub exclude_glob: Option<String>,
+    /// Clear existing alias on update.
+    pub clear_name: bool,
+    /// Clear existing include glob on update.
+    pub clear_include_glob: bool,
+    /// Clear existing exclude glob on update.
+    pub clear_exclude_glob: bool,
 }
 
 /// Path context record.
@@ -191,15 +212,46 @@ impl Database {
     }
 
     /// Insert or update a collection entry keyed by path.
-    pub fn upsert_collection(&self, path: &Path) -> Result<()> {
+    ///
+    /// # Arguments
+    /// `path` - Collection root path.
+    /// `changes` - Upsert payload containing update and clear directives.
+    ///
+    /// # Errors
+    /// Returns an error when SQL execution fails.
+    pub fn upsert_collection(&self, path: &Path, changes: &CollectionUpsert) -> Result<()> {
         let path_text = path.to_string_lossy();
         self.conn.execute(
             r#"
-INSERT INTO collections(path, updated_at)
-VALUES (?1, datetime('now'))
-ON CONFLICT(path) DO UPDATE SET updated_at=datetime('now')
+INSERT INTO collections(path, name, include_glob, exclude_glob, updated_at)
+VALUES (?1, ?2, ?3, ?4, datetime('now'))
+ON CONFLICT(path) DO UPDATE SET
+    name = CASE
+        WHEN ?5 THEN NULL
+        WHEN ?2 IS NOT NULL THEN ?2
+        ELSE name
+    END,
+    include_glob = CASE
+        WHEN ?6 THEN NULL
+        WHEN ?3 IS NOT NULL THEN ?3
+        ELSE include_glob
+    END,
+    exclude_glob = CASE
+        WHEN ?7 THEN NULL
+        WHEN ?4 IS NOT NULL THEN ?4
+        ELSE exclude_glob
+    END,
+    updated_at=datetime('now')
 "#,
-            params![path_text.as_ref()],
+            params![
+                path_text.as_ref(),
+                changes.name.as_deref(),
+                changes.include_glob.as_deref(),
+                changes.exclude_glob.as_deref(),
+                changes.clear_name,
+                changes.clear_include_glob,
+                changes.clear_exclude_glob
+            ],
         )?;
         Ok(())
     }
@@ -225,15 +277,17 @@ ON CONFLICT(path) DO UPDATE SET updated_at=datetime('now')
 
     /// List all collections sorted by insertion order.
     pub fn list_collections(&self) -> Result<Vec<Collection>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, path FROM collections ORDER BY id ASC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, path, include_glob, exclude_glob FROM collections ORDER BY id ASC",
+        )?;
 
         let rows = stmt.query_map([], |row| {
             Ok(Collection {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 path: row.get(2)?,
+                include_glob: row.get(3)?,
+                exclude_glob: row.get(4)?,
             })
         })?;
 
@@ -763,7 +817,7 @@ fn build_fts5_fallback_phrase_query(query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Database;
+    use super::{CollectionUpsert, Database};
     use crate::{
         chunker::Chunk,
         cli::{Cli, Commands, StatusArgs},
@@ -809,7 +863,8 @@ mod tests {
         let cfg = cfg_with_db(&db_path);
         let db = Database::open(&cfg).expect("open db");
 
-        db.upsert_collection(dir.path()).expect("add collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("add collection");
         let collections = db.list_collections().expect("list collections");
         assert_eq!(collections.len(), 1);
 
@@ -820,13 +875,113 @@ mod tests {
     }
 
     #[test]
+    fn collection_add_supports_name_and_globs() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(
+            dir.path(),
+            &CollectionUpsert {
+                name: Some("notes".to_string()),
+                include_glob: Some("**/*.md".to_string()),
+                exclude_glob: Some("**/.git/**".to_string()),
+                ..CollectionUpsert::default()
+            },
+        )
+        .expect("upsert collection");
+
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        assert_eq!(collection.name.as_deref(), Some("notes"));
+        assert_eq!(collection.include_glob.as_deref(), Some("**/*.md"));
+        assert_eq!(collection.exclude_glob.as_deref(), Some("**/.git/**"));
+    }
+
+    #[test]
+    fn collection_upsert_omitted_flags_keep_existing_values() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(
+            dir.path(),
+            &CollectionUpsert {
+                name: Some("notes".to_string()),
+                include_glob: Some("**/*.md".to_string()),
+                exclude_glob: Some("**/.git/**".to_string()),
+                ..CollectionUpsert::default()
+            },
+        )
+        .expect("first upsert collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("second upsert collection");
+
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        assert_eq!(collection.name.as_deref(), Some("notes"));
+        assert_eq!(collection.include_glob.as_deref(), Some("**/*.md"));
+        assert_eq!(collection.exclude_glob.as_deref(), Some("**/.git/**"));
+    }
+
+    #[test]
+    fn collection_upsert_clear_flags_reset_values() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(
+            dir.path(),
+            &CollectionUpsert {
+                name: Some("notes".to_string()),
+                include_glob: Some("**/*.md".to_string()),
+                exclude_glob: Some("**/.git/**".to_string()),
+                ..CollectionUpsert::default()
+            },
+        )
+        .expect("first upsert collection");
+        db.upsert_collection(
+            dir.path(),
+            &CollectionUpsert {
+                clear_name: true,
+                clear_include_glob: true,
+                clear_exclude_glob: true,
+                ..CollectionUpsert::default()
+            },
+        )
+        .expect("clear upsert collection");
+
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        assert!(collection.name.is_none());
+        assert!(collection.include_glob.is_none());
+        assert!(collection.exclude_glob.is_none());
+    }
+
+    #[test]
     fn bm25_search_handles_hyphenated_and_symbol_queries() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
         let cfg = cfg_with_db(&db_path);
         let db = Database::open(&cfg).expect("open db");
 
-        db.upsert_collection(dir.path()).expect("add collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("add collection");
         let collection = db
             .list_collections()
             .expect("list collections")
@@ -876,7 +1031,8 @@ mod tests {
         let cfg = cfg_with_db(&db_path);
         let db = Database::open(&cfg).expect("open db");
 
-        db.upsert_collection(dir.path()).expect("add collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("add collection");
         let collection = db
             .list_collections()
             .expect("list collections")
@@ -921,7 +1077,8 @@ mod tests {
         let cfg = cfg_with_db(&db_path);
         let db = Database::open(&cfg).expect("open db");
 
-        db.upsert_collection(dir.path()).expect("upsert collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("upsert collection");
         let collection = db
             .list_collections()
             .expect("list collections")
@@ -973,7 +1130,8 @@ mod tests {
         let cfg = cfg_with_db(&db_path);
         let db = Database::open(&cfg).expect("open db");
 
-        db.upsert_collection(dir.path()).expect("upsert collection");
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("upsert collection");
         let collection = db
             .list_collections()
             .expect("list collections")

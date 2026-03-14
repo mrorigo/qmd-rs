@@ -12,7 +12,7 @@ mod search;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, CollectionAction, Commands, ContextAction};
-use db::Database;
+use db::{CollectionUpsert, Database};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,9 +27,36 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Collection(cmd) => match cmd.action {
-            CollectionAction::Add { path } => {
-                db.upsert_collection(&path)?;
-                println!("collection.added path={}", path.display());
+            CollectionAction::Add {
+                path,
+                name,
+                include_glob,
+                exclude_glob,
+                clear_name,
+                clear_include_glob,
+                clear_exclude_glob,
+            } => {
+                let name = sanitize_optional(name)?;
+                let include_glob = sanitize_optional(include_glob)?;
+                let exclude_glob = sanitize_optional(exclude_glob)?;
+                db.upsert_collection(
+                    &path,
+                    &CollectionUpsert {
+                        name: name.clone(),
+                        include_glob: include_glob.clone(),
+                        exclude_glob: exclude_glob.clone(),
+                        clear_name,
+                        clear_include_glob,
+                        clear_exclude_glob,
+                    },
+                )?;
+                println!(
+                    "collection.added path={} name={} include_glob={} exclude_glob={}",
+                    path.display(),
+                    name.unwrap_or_else(|| "-".to_string()),
+                    include_glob.unwrap_or_else(|| "-".to_string()),
+                    exclude_glob.unwrap_or_else(|| "-".to_string()),
+                );
             }
             CollectionAction::Remove { path } => {
                 let changed = db.remove_collection(&path)?;
@@ -42,10 +69,12 @@ async fn main() -> Result<()> {
             CollectionAction::List => {
                 for item in db.list_collections()? {
                     println!(
-                        "collection id={} name={} path={}",
+                        "collection id={} name={} path={} include_glob={} exclude_glob={}",
                         item.id,
                         item.name.unwrap_or_else(|| "-".to_string()),
-                        item.path
+                        item.path,
+                        item.include_glob.unwrap_or_else(|| "-".to_string()),
+                        item.exclude_glob.unwrap_or_else(|| "-".to_string())
                     );
                 }
             }
@@ -161,6 +190,19 @@ fn print_status(cfg: &config::Config, health: &db::HealthReport, verbose: bool) 
 
 fn compact(s: &str) -> String {
     s.trim().replace('\n', " ")
+}
+
+fn sanitize_optional(value: Option<String>) -> Result<Option<String>> {
+    match value {
+        Some(raw) => {
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("empty values are not allowed; omit the option or use a clear flag");
+            }
+            Ok(Some(trimmed))
+        }
+        None => Ok(None),
+    }
 }
 
 fn print_results(results: &[search::SearchResult]) {

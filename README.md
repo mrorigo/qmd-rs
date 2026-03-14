@@ -96,6 +96,7 @@ qmd status [--verbose] [--smoke-api]
 
 ```bash
 qmd collection add /path/to/notes
+qmd collection add /path/to/notes --name notes --include-glob "**/*.md" --exclude-glob "**/.git/**"
 ```
 
 2. Embed markdown content:
