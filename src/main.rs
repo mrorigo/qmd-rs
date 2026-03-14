@@ -167,6 +167,10 @@ fn print_status(cfg: &config::Config, health: &db::HealthReport, verbose: bool) 
     println!("index.documents_fts={}", health.has_documents_fts);
     println!("index.vectors_vec={}", health.has_vectors_vec);
     println!("vector.mode={}", health.vector_mode);
+    println!(
+        "vector.embedding_dimensions={}",
+        health.embedding_dimensions
+    );
     println!("count.collections={}", health.total_collections);
     println!("count.contexts={}", health.total_contexts);
     println!("count.documents={}", health.total_documents);
@@ -180,6 +184,10 @@ fn print_status(cfg: &config::Config, health: &db::HealthReport, verbose: bool) 
         println!("api.base_url={}", cfg.api.base_url);
         println!("api.api_key_set={}", !cfg.api.api_key.is_empty());
         println!("models.embedding={}", cfg.models.embedding);
+        println!(
+            "models.embedding_dimensions={}",
+            cfg.models.embedding_dimensions
+        );
         println!("models.llm={}", cfg.models.llm);
         println!("models.reranker={}", cfg.models.reranker);
         println!("query.expansion_variants={}", cfg.query.expansion_variants);

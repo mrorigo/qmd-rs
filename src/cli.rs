@@ -26,6 +26,9 @@ pub struct Cli {
     /// Embedding model override.
     #[arg(long, env = "QMD_MODEL_EMBEDDING", global = true)]
     pub model_embedding: Option<String>,
+    /// Embedding vector dimensions override.
+    #[arg(long, env = "QMD_MODEL_EMBEDDING_DIM", global = true)]
+    pub model_embedding_dim: Option<usize>,
 
     /// LLM model override.
     #[arg(long, env = "QMD_MODEL_LLM", global = true)]

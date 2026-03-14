@@ -133,6 +133,8 @@ pub struct HealthReport {
     pub vectors_note: Option<String>,
     /// Active vector execution mode.
     pub vector_mode: String,
+    /// Configured embedding vector dimensions.
+    pub embedding_dimensions: usize,
     /// Collection rows.
     pub total_collections: i64,
     /// Context rows.
@@ -206,7 +208,7 @@ impl Database {
         };
 
         db.run_migrations()?;
-        db.ensure_vectors_virtual_table()?;
+        db.ensure_vectors_virtual_table(cfg.models.embedding_dimensions)?;
         db.vec_version()?;
         Ok(db)
     }
@@ -626,6 +628,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             has_vectors_vec,
             vectors_note,
             vector_mode: "native-sqlite-vec".to_string(),
+            embedding_dimensions: self.detect_vectors_vec_dimension()?.unwrap_or_default(),
             total_collections: self.count("collections")?,
             total_contexts: self.count("path_contexts")?,
             total_documents: self.count("documents")?,
@@ -675,10 +678,34 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         Ok(())
     }
 
-    fn ensure_vectors_virtual_table(&self) -> Result<()> {
+    fn ensure_vectors_virtual_table(&self, embedding_dimensions: usize) -> Result<()> {
+        anyhow::ensure!(embedding_dimensions > 0, "embedding dimensions must be > 0");
+
+        if let Some(existing) = self.detect_vectors_vec_dimension()? {
+            if existing != embedding_dimensions {
+                self.rebuild_for_dimension_change(embedding_dimensions)?;
+            }
+            return Ok(());
+        }
+
+        let sql = format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding FLOAT[{embedding_dimensions}]);"
+        );
+        self.conn.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    fn rebuild_for_dimension_change(&self, embedding_dimensions: usize) -> Result<()> {
         self.conn.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding FLOAT[1536]);",
+            "DROP TABLE IF EXISTS vectors_vec;
+             DELETE FROM documents_fts;
+             DELETE FROM content_vectors;
+             DELETE FROM documents;",
         )?;
+        let sql = format!(
+            "CREATE VIRTUAL TABLE vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding FLOAT[{embedding_dimensions}]);"
+        );
+        self.conn.execute_batch(&sql)?;
         Ok(())
     }
 
@@ -727,6 +754,33 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     row.get(0)
                 })?;
         Ok(total as usize)
+    }
+
+    fn detect_vectors_vec_dimension(&self) -> Result<Option<usize>> {
+        let create_sql = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'vectors_vec' LIMIT 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        let Some(sql) = create_sql else {
+            return Ok(None);
+        };
+
+        let marker = "FLOAT[";
+        let Some(start) = sql.find(marker) else {
+            return Ok(None);
+        };
+        let rest = &sql[start + marker.len()..];
+        let Some(end) = rest.find(']') else {
+            return Ok(None);
+        };
+        let dim = rest[..end].trim().parse::<usize>().ok();
+        Ok(dim)
     }
 
     fn reconstruct_document_content(&self, docid: &str) -> Result<String> {
@@ -817,12 +871,20 @@ mod tests {
     use tempfile::tempdir;
 
     fn cfg_with_db(path: &std::path::Path) -> config::Config {
+        cfg_with_db_and_dim(path, None)
+    }
+
+    fn cfg_with_db_and_dim(
+        path: &std::path::Path,
+        model_embedding_dim: Option<usize>,
+    ) -> config::Config {
         let cli = Cli {
             config: None,
             db_path: Some(path.to_path_buf()),
             api_base_url: None,
             api_key: None,
             model_embedding: None,
+            model_embedding_dim,
             model_llm: None,
             model_reranker: None,
             command: Commands::Status(StatusArgs {
@@ -996,7 +1058,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
             }],
-            &[vec![0.0_f32; 1536]],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
         )
         .expect("replace chunks");
 
@@ -1047,12 +1109,15 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
             }],
-            &[vec![0.0_f32; 1536]],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
         )
         .expect("replace chunks");
 
         let results = db
-            .vector_search(&json!(vec![0.0_f32; 1536]).to_string(), 1)
+            .vector_search(
+                &json!(vec![0.0_f32; cfg.models.embedding_dimensions]).to_string(),
+                1,
+            )
             .expect("vector search");
 
         assert_eq!(results.len(), 1);
@@ -1093,7 +1158,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
             }],
-            &[vec![0.0_f32; 1536]],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
         )
         .expect("replace chunks");
 
@@ -1146,7 +1211,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
             }],
-            &[vec![0.0_f32; 1536]],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
         )
         .expect("replace chunks");
 
@@ -1157,5 +1222,55 @@ mod tests {
             !results.is_empty(),
             "bm25 search should return at least one result"
         );
+    }
+
+    #[test]
+    fn reinitializes_vector_index_when_dimension_changes() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+
+        let cfg_1536 = cfg_with_db_and_dim(&db_path, Some(1536));
+        let db_1536 = Database::open(&cfg_1536).expect("open db with 1536");
+        db_1536
+            .upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("upsert collection");
+        let collection = db_1536
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection");
+        let doc_path = dir.path().join("vector.md");
+        db_1536
+            .upsert_document(
+                "doc-dim",
+                collection.id,
+                &doc_path,
+                Some("dim"),
+                "hash-dim",
+                None,
+            )
+            .expect("upsert document");
+        db_1536
+            .replace_document_chunks(
+                "doc-dim",
+                &doc_path,
+                &[Chunk {
+                    content: "dimension test".to_string(),
+                    token_count: 2,
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[vec![0.0_f32; 1536]],
+            )
+            .expect("replace chunks");
+        assert_eq!(db_1536.health_report().expect("health").total_documents, 1);
+
+        let cfg_768 = cfg_with_db_and_dim(&db_path, Some(768));
+        let db_768 = Database::open(&cfg_768).expect("open db with 768");
+        let health = db_768.health_report().expect("health");
+        assert_eq!(health.embedding_dimensions, 768);
+        assert_eq!(health.total_documents, 0);
+        assert_eq!(health.total_chunks, 0);
     }
 }

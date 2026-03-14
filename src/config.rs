@@ -35,6 +35,8 @@ pub struct ApiConfig {
 pub struct ModelsConfig {
     /// Embedding model id.
     pub embedding: String,
+    /// Embedding vector dimensions.
+    pub embedding_dimensions: usize,
     /// Chat/query-expansion model id.
     pub llm: String,
     /// Reranker model id.
@@ -74,6 +76,7 @@ struct PartialApiConfig {
 #[derive(Debug, Default, Deserialize)]
 struct PartialModelsConfig {
     embedding: Option<String>,
+    embedding_dimensions: Option<usize>,
     llm: Option<String>,
     reranker: Option<String>,
 }
@@ -103,6 +106,7 @@ impl Default for Config {
             },
             models: ModelsConfig {
                 embedding: "embeddinggemma:latest".to_string(),
+                embedding_dimensions: 1536,
                 llm: "llama3.2:3b".to_string(),
                 reranker: "sam860/qwen3-reranker:0.6b-Q8_0".to_string(),
             },
@@ -173,6 +177,9 @@ fn merge_file(cfg: &mut Config, file: PartialConfig) {
         if let Some(embedding) = models.embedding {
             cfg.models.embedding = embedding;
         }
+        if let Some(embedding_dimensions) = models.embedding_dimensions {
+            cfg.models.embedding_dimensions = embedding_dimensions;
+        }
         if let Some(llm) = models.llm {
             cfg.models.llm = llm;
         }
@@ -210,6 +217,9 @@ fn merge_cli(cfg: &mut Config, cli: &Cli) {
     if let Some(v) = &cli.model_embedding {
         cfg.models.embedding = v.clone();
     }
+    if let Some(v) = cli.model_embedding_dim {
+        cfg.models.embedding_dimensions = v;
+    }
     if let Some(v) = &cli.model_llm {
         cfg.models.llm = v.clone();
     }
@@ -230,6 +240,10 @@ fn validate(cfg: &Config) -> Result<()> {
     anyhow::ensure!(
         !cfg.models.llm.trim().is_empty(),
         "models.llm cannot be empty"
+    );
+    anyhow::ensure!(
+        cfg.models.embedding_dimensions > 0,
+        "models.embedding_dimensions must be > 0"
     );
     anyhow::ensure!(
         !cfg.models.reranker.trim().is_empty(),
@@ -261,6 +275,7 @@ mod tests {
             api_base_url: None,
             api_key: None,
             model_embedding: None,
+            model_embedding_dim: None,
             model_llm: None,
             model_reranker: None,
             command: Commands::Status(StatusArgs {
@@ -281,6 +296,7 @@ api_key = "file-key"
 
 [models]
 embedding = "file-embed"
+embedding_dimensions = 768
 llm = "file-llm"
 reranker = "file-reranker"
 
@@ -297,7 +313,21 @@ db_path = "file.sqlite"
         let cfg = load(&cli).expect("load config");
         assert_eq!(cfg.api.base_url, "http://file.local/v1");
         assert_eq!(cfg.models.embedding, "file-embed");
+        assert_eq!(cfg.models.embedding_dimensions, 768);
         assert_eq!(cfg.models.llm, "cli-llm");
         assert_eq!(cfg.storage.db_path, PathBuf::from("cli.sqlite"));
+    }
+
+    #[test]
+    fn rejects_zero_embedding_dimensions() {
+        let mut cli = base_cli();
+        cli.model_embedding_dim = Some(0);
+
+        let err = load(&cli).expect_err("zero dims should fail");
+        assert!(
+            err.to_string()
+                .contains("models.embedding_dimensions must be > 0"),
+            "unexpected error: {err}"
+        );
     }
 }

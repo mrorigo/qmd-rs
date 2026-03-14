@@ -303,6 +303,7 @@ fn mcp_tools() -> Vec<ToolDef> {
             "has_vectors_vec": { "type": "boolean" },
             "vectors_note": { "type": ["string", "null"] },
             "vector_mode": { "type": "string" },
+            "embedding_dimensions": { "type": "integer" },
             "total_collections": { "type": "integer" },
             "total_contexts": { "type": "integer" },
             "total_documents": { "type": "integer" },
@@ -315,6 +316,7 @@ fn mcp_tools() -> Vec<ToolDef> {
             "has_vectors_vec",
             "vectors_note",
             "vector_mode",
+            "embedding_dimensions",
             "total_collections",
             "total_contexts",
             "total_documents",
@@ -396,6 +398,7 @@ mod tests {
             api_base_url: None,
             api_key: None,
             model_embedding: None,
+            model_embedding_dim: None,
             model_llm: None,
             model_reranker: None,
             command: Commands::Status(StatusArgs {
@@ -440,7 +443,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
             }],
-            &[vec![0.0_f32; 1536]],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
         )
         .expect("replace chunks");
 

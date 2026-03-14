@@ -55,6 +55,7 @@ api_key = "ollama"
 
 [models]
 embedding = "embeddinggemma:latest"
+embedding_dimensions = 1536
 llm = "llama3.2:3b"
 reranker = "sam860/qwen3-reranker:0.6b-Q8_0"
 
@@ -72,6 +73,7 @@ Supported env vars:
 - `QMD_API_BASE_URL`
 - `QMD_API_KEY`
 - `QMD_MODEL_EMBEDDING`
+- `QMD_MODEL_EMBEDDING_DIM`
 - `QMD_MODEL_LLM`
 - `QMD_MODEL_RERANKER`
 
