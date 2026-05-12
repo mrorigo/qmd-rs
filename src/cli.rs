@@ -165,6 +165,10 @@ pub struct McpArgs {
     #[arg(long)]
     pub http: bool,
 
+    /// HTTP bind address.
+    #[arg(long)]
+    pub bind_address: Option<std::net::IpAddr>,
+
     /// HTTP listen port.
     #[arg(long, default_value_t = 8080)]
     pub port: u16,

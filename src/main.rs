@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
         }
         Commands::Mcp(args) => {
             if args.http {
-                mcp::run_http(cfg.clone(), args.port).await?;
+                mcp::run_http(cfg.clone(), args.bind_address, args.port).await?;
             } else {
                 mcp::run_stdio(cfg.clone()).await?;
             }

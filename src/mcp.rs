@@ -1,7 +1,7 @@
 // Rust guideline compliant 2026-03-08
 
 use crate::{config::Config, db::Database, search};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -89,7 +89,7 @@ pub async fn run_stdio(cfg: Config) -> Result<()> {
 }
 
 /// Run MCP server over Streamable HTTP with a single MCP endpoint.
-pub async fn run_http(cfg: Config, port: u16) -> Result<()> {
+pub async fn run_http(cfg: Config, bind_address: Option<std::net::IpAddr>, port: u16) -> Result<()> {
     let state = AppState {
         cfg,
         initialized: std::sync::Arc::new(AtomicBool::new(false)),
@@ -99,9 +99,8 @@ pub async fn run_http(cfg: Config, port: u16) -> Result<()> {
         .route("/mcp", post(http_post).get(http_get))
         .with_state(state);
 
-    let addr: SocketAddr = format!("127.0.0.1:{port}")
-        .parse()
-        .context("invalid bind address")?;
+    let bind_address = bind_address.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::new(bind_address, port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
