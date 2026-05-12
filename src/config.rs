@@ -11,6 +11,8 @@ use std::{
 /// Effective runtime configuration for qmd.
 #[derive(Debug, Clone, Serialize)]
 pub struct Config {
+    /// Runtime operating mode.
+    pub mode: ModeConfig,
     /// API endpoint configuration.
     pub api: ApiConfig,
     /// Model names used for each pipeline stage.
@@ -19,6 +21,16 @@ pub struct Config {
     pub query: QueryConfig,
     /// Local storage settings.
     pub storage: StorageConfig,
+}
+
+/// Runtime operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeConfig {
+    /// Never require external model integrations.
+    Offline,
+    /// Allow optional model-backed features.
+    Enhanced,
 }
 
 /// OpenAI-compatible API settings.
@@ -100,6 +112,7 @@ impl Default for Config {
             .join("index.sqlite");
 
         Self {
+            mode: ModeConfig::Enhanced,
             api: ApiConfig {
                 base_url: "http://localhost:11434/v1".to_string(),
                 api_key: "ollama".to_string(),
@@ -208,6 +221,9 @@ fn merge_cli(cfg: &mut Config, cli: &Cli) {
     if let Some(v) = &cli.db_path {
         cfg.storage.db_path = v.clone();
     }
+    if cli.offline {
+        cfg.mode = ModeConfig::Offline;
+    }
     if let Some(v) = &cli.api_base_url {
         cfg.api.base_url = v.clone();
     }
@@ -230,24 +246,8 @@ fn merge_cli(cfg: &mut Config, cli: &Cli) {
 
 fn validate(cfg: &Config) -> Result<()> {
     anyhow::ensure!(
-        !cfg.api.base_url.trim().is_empty(),
-        "api.base_url cannot be empty"
-    );
-    anyhow::ensure!(
-        !cfg.models.embedding.trim().is_empty(),
-        "models.embedding cannot be empty"
-    );
-    anyhow::ensure!(
-        !cfg.models.llm.trim().is_empty(),
-        "models.llm cannot be empty"
-    );
-    anyhow::ensure!(
         cfg.models.embedding_dimensions > 0,
         "models.embedding_dimensions must be > 0"
-    );
-    anyhow::ensure!(
-        !cfg.models.reranker.trim().is_empty(),
-        "models.reranker cannot be empty"
     );
     anyhow::ensure!(
         cfg.query.expansion_variants <= 4,
@@ -258,6 +258,25 @@ fn validate(cfg: &Config) -> Result<()> {
         !cfg.storage.db_path.as_os_str().is_empty(),
         "storage.db_path cannot be empty"
     );
+
+    if cfg.mode == ModeConfig::Enhanced {
+        anyhow::ensure!(
+            !cfg.api.base_url.trim().is_empty(),
+            "api.base_url cannot be empty in enhanced mode"
+        );
+        anyhow::ensure!(
+            !cfg.models.embedding.trim().is_empty(),
+            "models.embedding cannot be empty in enhanced mode"
+        );
+        anyhow::ensure!(
+            !cfg.models.llm.trim().is_empty(),
+            "models.llm cannot be empty in enhanced mode"
+        );
+        anyhow::ensure!(
+            !cfg.models.reranker.trim().is_empty(),
+            "models.reranker cannot be empty in enhanced mode"
+        );
+    }
     Ok(())
 }
 
@@ -274,6 +293,7 @@ mod tests {
             db_path: None,
             api_base_url: None,
             api_key: None,
+            offline: false,
             model_embedding: None,
             model_embedding_dim: None,
             model_llm: None,
@@ -329,5 +349,17 @@ db_path = "file.sqlite"
                 .contains("models.embedding_dimensions must be > 0"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn offline_mode_allows_missing_model_fields() {
+        let mut cli = base_cli();
+        cli.offline = true;
+        cli.model_embedding = None;
+        cli.model_llm = None;
+        cli.model_reranker = None;
+
+        let cfg = load(&cli).expect("load offline config");
+        assert_eq!(cfg.mode, super::ModeConfig::Offline);
     }
 }

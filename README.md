@@ -8,7 +8,8 @@ Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engi
 
 - Rust-native rewrite of the original qmd idea
 - No in-process ML runtime baggage
-- Uses OpenAI-compatible APIs for embeddings, expansion, and reranking
+- Works fully offline for local indexing, BM25 search, retrieval, and MCP tools
+- Optional OpenAI-compatible APIs for embeddings, expansion, and reranking
 - SQLite + FTS5 core with vector-ready storage
 - Agent-facing tool surface via MCP modes
 
@@ -20,6 +21,7 @@ Lean Query Markup Documents in Rust: a fast, local-first markdown retrieval engi
 - Full-text: FTS5 (`documents_fts`)
 - Vector data: native `sqlite-vec` (`vec0`) index for vector retrieval
 - API client: `reqwest` against OpenAI-compatible endpoints
+- Mode flag: offline or enhanced runtime selection
 
 ## Install and Build
 
@@ -91,6 +93,13 @@ qmd multi-get <pattern>
 qmd mcp [--http] [--port]
 qmd status [--verbose] [--smoke-api]
 ```
+
+Offline mode:
+
+- `qmd --offline embed` builds the local FTS index without embeddings
+- `qmd --offline search` uses BM25 only
+- `qmd --offline query` falls back to local BM25-based hybrid heuristics
+- `qmd --offline vsearch` is disabled because it requires embeddings
 
 ## Quickstart
 
@@ -172,6 +181,8 @@ Notes:
 - Reciprocal Rank Fusion (`k=60`) with top-rank bonus
 - Reranker call on top candidates
 - Position-aware blend between RRF and reranker scores
+
+In offline mode, `qmd query` skips model-backed steps and uses local BM25-based ranking only.
 
 ## Chunking Strategy
 

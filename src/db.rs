@@ -121,6 +121,8 @@ pub struct PathContext {
 /// Index health summary for status output.
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthReport {
+    /// Active runtime mode.
+    pub mode: String,
     /// Database file location.
     pub db_path: PathBuf,
     /// Number of applied schema migrations.
@@ -392,8 +394,9 @@ ON CONFLICT(path) DO UPDATE SET
         chunks: &[Chunk],
         embeddings: &[Vec<f32>],
     ) -> Result<()> {
+        let use_embeddings = embeddings.len() == chunks.len();
         anyhow::ensure!(
-            chunks.len() == embeddings.len(),
+            embeddings.is_empty() || use_embeddings,
             "chunk/embedding length mismatch"
         );
 
@@ -419,9 +422,13 @@ ON CONFLICT(path) DO UPDATE SET
             .flatten();
 
         let path_text = path.to_string_lossy();
-        for (index, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+        for (index, chunk) in chunks.iter().enumerate() {
             let hash_seq = format!("{}:{:04}", docid, index);
-            let embedding_json = serde_json::to_string(embedding)?;
+            let embedding_json = if use_embeddings {
+                Some(serde_json::to_string(&embeddings[index])?)
+            } else {
+                None
+            };
 
             self.conn.execute(
                 r#"
@@ -441,11 +448,13 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     embedding_json,
                 ],
             )?;
-            let vector_json = serde_json::to_string(embedding)?;
-            self.conn.execute(
-                "INSERT INTO vectors_vec(hash_seq, embedding) VALUES (?1, ?2)",
-                params![hash_seq, vector_json],
-            )?;
+            if use_embeddings {
+                let vector_json = serde_json::to_string(&embeddings[index])?;
+                self.conn.execute(
+                    "INSERT INTO vectors_vec(hash_seq, embedding) VALUES (?1, ?2)",
+                    params![hash_seq, vector_json],
+                )?;
+            }
 
             self.conn.execute(
                 "INSERT INTO documents_fts(docid, path, title, content) VALUES (?1, ?2, ?3, ?4)",
@@ -454,6 +463,39 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         }
 
         Ok(())
+    }
+
+    /// Delete a document and all derived index rows by exact path.
+    pub fn delete_document_by_path(&self, path: &Path) -> Result<bool> {
+        let path_text = path.to_string_lossy();
+        let docid = self
+            .conn
+            .query_row(
+                "SELECT docid FROM documents WHERE path = ?1 LIMIT 1",
+                params![path_text.as_ref()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        let Some(docid) = docid else {
+            return Ok(false);
+        };
+
+        self.conn.execute(
+            "DELETE FROM documents_fts WHERE docid = ?1",
+            params![docid.as_str()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM vectors_vec WHERE hash_seq LIKE ?1",
+            params![format!("{docid}:%")],
+        )?;
+        self.conn.execute(
+            "DELETE FROM content_vectors WHERE docid = ?1",
+            params![docid.as_str()],
+        )?;
+        self.conn
+            .execute("DELETE FROM documents WHERE docid = ?1", params![docid])?;
+        Ok(true)
     }
 
     /// Clear indexed documents and chunk data.
@@ -614,20 +656,33 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
     }
 
     /// Compute status health and index presence.
-    pub fn health_report(&self) -> Result<HealthReport> {
+    pub fn health_report(&self, cfg: &Config) -> Result<HealthReport> {
         let applied_migrations = self.migration_count()?;
         let has_documents_fts = self.has_table("documents_fts")?;
         let has_vectors_vec = self.has_table("vectors_vec")?;
-        let vec_version = self.vec_version()?;
-        let vectors_note = Some(format!("sqlite-vec active ({vec_version})"));
+        let vec_version = self.vec_version().ok();
+        let vectors_note = match vec_version {
+            Some(version) if has_vectors_vec => Some(format!("sqlite-vec active ({version})")),
+            Some(version) => Some(format!("sqlite-vec available ({version})")),
+            None => Some("vector index unavailable".to_string()),
+        };
+        let mode = match cfg.mode {
+            crate::config::ModeConfig::Offline => "offline".to_string(),
+            crate::config::ModeConfig::Enhanced => "enhanced".to_string(),
+        };
 
         Ok(HealthReport {
+            mode,
             db_path: self.db_path.clone(),
             applied_migrations,
             has_documents_fts,
             has_vectors_vec,
             vectors_note,
-            vector_mode: "native-sqlite-vec".to_string(),
+            vector_mode: if has_vectors_vec {
+                "native-sqlite-vec".to_string()
+            } else {
+                "disabled".to_string()
+            },
             embedding_dimensions: self.detect_vectors_vec_dimension()?.unwrap_or_default(),
             total_collections: self.count("collections")?,
             total_contexts: self.count("path_contexts")?,
@@ -883,6 +938,7 @@ mod tests {
             db_path: Some(path.to_path_buf()),
             api_base_url: None,
             api_key: None,
+            offline: true,
             model_embedding: None,
             model_embedding_dim,
             model_llm: None,
@@ -902,7 +958,7 @@ mod tests {
         let cfg = cfg_with_db(&db_path);
 
         let db = Database::open(&cfg).expect("open db");
-        let health = db.health_report().expect("health");
+        let health = db.health_report(&cfg).expect("health");
         assert!(health.applied_migrations >= 1);
         assert!(health.has_documents_fts);
     }
@@ -1264,11 +1320,17 @@ mod tests {
                 &[vec![0.0_f32; 1536]],
             )
             .expect("replace chunks");
-        assert_eq!(db_1536.health_report().expect("health").total_documents, 1);
+        assert_eq!(
+            db_1536
+                .health_report(&cfg_1536)
+                .expect("health")
+                .total_documents,
+            1
+        );
 
         let cfg_768 = cfg_with_db_and_dim(&db_path, Some(768));
         let db_768 = Database::open(&cfg_768).expect("open db with 768");
-        let health = db_768.health_report().expect("health");
+        let health = db_768.health_report(&cfg_768).expect("health");
         assert_eq!(health.embedding_dimensions, 768);
         assert_eq!(health.total_documents, 0);
         assert_eq!(health.total_chunks, 0);

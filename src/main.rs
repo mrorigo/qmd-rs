@@ -141,9 +141,9 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Status(args) => {
-            let health = db.health_report()?;
+            let health = db.health_report(&cfg)?;
             print_status(&cfg, &health, args.verbose);
-            if args.smoke_api {
+            if args.smoke_api && cfg.mode == config::ModeConfig::Enhanced {
                 let client = api::ApiClient::from_config(&cfg);
                 client.smoke_embeddings(&cfg.models.embedding).await?;
                 let llm = client
@@ -153,6 +153,8 @@ async fn main() -> Result<()> {
                 println!("api_smoke.embeddings=ok");
                 println!("api_smoke.chat={}", compact(&llm));
                 println!("api_smoke.reranker={}", compact(&rerank));
+            } else if args.smoke_api {
+                println!("api_smoke=skipped mode=offline");
             }
         }
     }
@@ -162,6 +164,7 @@ async fn main() -> Result<()> {
 
 fn print_status(cfg: &config::Config, health: &db::HealthReport, verbose: bool) {
     println!("qmd-rs status=ok");
+    println!("mode={}", health.mode);
     println!("db.path={}", health.db_path.display());
     println!("db.migrations_applied={}", health.applied_migrations);
     println!("index.documents_fts={}", health.has_documents_fts);

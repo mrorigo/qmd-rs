@@ -1,6 +1,11 @@
 // Rust guideline compliant 2026-03-08
 
-use crate::{config::Config, db::Database, search};
+use crate::{
+    config::Config,
+    db::Database,
+    ingest::{self, is_markdown, matches_collection_filters},
+    search,
+};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -15,13 +20,16 @@ use axum::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     convert::Infallible,
     net::SocketAddr,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    thread,
+    time::{Duration, SystemTime},
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_stream::{wrappers::IntervalStream, StreamExt};
+use walkdir::WalkDir;
 
 const JSONRPC_VERSION: &str = "2.0";
 const PROTOCOL_VERSION: &str = "2025-11-25";
@@ -50,6 +58,7 @@ struct ToolDef {
 
 /// Run MCP server in stdio mode.
 pub async fn run_stdio(cfg: Config) -> Result<()> {
+    spawn_collection_watcher(cfg.clone());
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
@@ -89,7 +98,12 @@ pub async fn run_stdio(cfg: Config) -> Result<()> {
 }
 
 /// Run MCP server over Streamable HTTP with a single MCP endpoint.
-pub async fn run_http(cfg: Config, bind_address: Option<std::net::IpAddr>, port: u16) -> Result<()> {
+pub async fn run_http(
+    cfg: Config,
+    bind_address: Option<std::net::IpAddr>,
+    port: u16,
+) -> Result<()> {
+    spawn_collection_watcher(cfg.clone());
     let state = AppState {
         cfg,
         initialized: std::sync::Arc::new(AtomicBool::new(false)),
@@ -159,7 +173,7 @@ async fn handle_request(cfg: &Config, initialized: bool, payload: &Value, id: Va
             if !initialized {
                 return jsonrpc_error(id, INVALID_REQUEST, "server not initialized");
             }
-            jsonrpc_result(id, json!({ "tools": mcp_tools() }))
+            jsonrpc_result(id, json!({ "tools": mcp_tools(cfg) }))
         }
         "tools/call" => {
             if !initialized {
@@ -203,10 +217,24 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
             serde_json::to_value(search::run_bm25_search(&db, query, 20)?)?
         }
         "vector_search" => {
+            if cfg.mode == crate::config::ModeConfig::Offline {
+                anyhow::bail!("vector_search is disabled in offline mode");
+            }
             let query = required_string(&args, "query")?;
             serde_json::to_value(search::run_vector_search(cfg, query, 20).await?)?
         }
         "deep_search" => {
+            if cfg.mode == crate::config::ModeConfig::Offline {
+                let query = required_string(&args, "query")?;
+                let db = Database::open(cfg)?;
+                let results = search::run_bm25_search(&db, query, 20)?;
+                let structured_content =
+                    normalize_structured_content(serde_json::to_value(results)?);
+                return Ok(json!({
+                    "content": [{"type": "text", "text": serde_json::to_string_pretty(&structured_content)?}],
+                    "structuredContent": structured_content
+                }));
+            }
             let query = required_string(&args, "query")?;
             serde_json::to_value(search::run_hybrid_query(cfg, query).await?)?
         }
@@ -225,7 +253,7 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
         }
         "status" => {
             let db = Database::open(cfg)?;
-            serde_json::to_value(db.health_report()?)?
+            serde_json::to_value(db.health_report(cfg)?)?
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     };
@@ -239,6 +267,102 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
     }))
 }
 
+fn spawn_collection_watcher(cfg: Config) {
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+
+        let Ok(runtime) = runtime else {
+            tracing::warn!("failed to start collection watcher runtime");
+            return;
+        };
+
+        let mut state = WatchState::default();
+        loop {
+            if let Err(err) = runtime.block_on(sync_collections_once(&cfg, &mut state)) {
+                tracing::warn!(error = %err, "collection watcher sync failed");
+            }
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+async fn sync_collections_once(cfg: &Config, state: &mut WatchState) -> Result<()> {
+    let db = Database::open(cfg)?;
+    let collections = db.list_collections()?;
+    let mut next_seen = HashMap::new();
+
+    for collection in collections {
+        let collection_path = std::path::Path::new(&collection.path);
+        if !collection_path.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(collection_path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            if !is_markdown(path) {
+                continue;
+            }
+            if !matches_collection_filters(
+                path,
+                collection_path,
+                collection.include_glob.as_deref(),
+                collection.exclude_glob.as_deref(),
+            )? {
+                continue;
+            }
+
+            let fingerprint = file_fingerprint(path)?;
+            next_seen.insert(path.to_path_buf(), fingerprint.clone());
+            if state.seen.get(path) != Some(&fingerprint) {
+                let _ = ingest::sync_markdown_file(cfg, &db, path).await?;
+            }
+        }
+    }
+
+    for path in state.seen.keys() {
+        if !next_seen.contains_key(path) {
+            let _ = ingest::remove_markdown_file(&db, path)?;
+        }
+    }
+
+    state.seen = next_seen;
+    Ok(())
+}
+
+#[derive(Default)]
+struct WatchState {
+    seen: HashMap<std::path::PathBuf, FileFingerprint>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    modified_secs: Option<u64>,
+    len: Option<u64>,
+}
+
+fn file_fingerprint(path: &std::path::Path) -> Result<FileFingerprint> {
+    let meta = std::fs::metadata(path)?;
+    let modified_secs = meta
+        .modified()
+        .ok()
+        .and_then(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    Ok(FileFingerprint {
+        modified_secs,
+        len: Some(meta.len()),
+    })
+}
+
 fn normalize_structured_content(value: Value) -> Value {
     match value {
         Value::Object(_) => value,
@@ -247,7 +371,7 @@ fn normalize_structured_content(value: Value) -> Value {
     }
 }
 
-fn mcp_tools() -> Vec<ToolDef> {
+fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
     let search_result_schema = json!({
         "type": "object",
         "properties": {
@@ -296,6 +420,7 @@ fn mcp_tools() -> Vec<ToolDef> {
     let status_schema = json!({
         "type": "object",
         "properties": {
+            "mode": { "type": "string" },
             "db_path": { "type": "string" },
             "applied_migrations": { "type": "integer" },
             "has_documents_fts": { "type": "boolean" },
@@ -309,6 +434,7 @@ fn mcp_tools() -> Vec<ToolDef> {
             "total_chunks": { "type": "integer" }
         },
         "required": [
+            "mode",
             "db_path",
             "applied_migrations",
             "has_documents_fts",
@@ -323,44 +449,55 @@ fn mcp_tools() -> Vec<ToolDef> {
         ]
     });
 
-    vec![
+    let mut tools = vec![
         ToolDef {
             name: "search",
-            description: "Execute BM25 keyword search.",
+            description: "Execute BM25 keyword search. Safe in offline mode.",
             input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
             output_schema: search_results_schema.clone(),
-        },
-        ToolDef {
-            name: "vector_search",
-            description: "Execute semantic vector search.",
-            input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
-            output_schema: search_results_schema.clone(),
-        },
-        ToolDef {
-            name: "deep_search",
-            description: "Execute hybrid deep search.",
-            input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
-            output_schema: search_results_schema,
         },
         ToolDef {
             name: "get",
-            description: "Retrieve one document by selector.",
+            description: "Retrieve one document by selector. Safe in offline mode.",
             input_schema: json!({"type":"object","properties":{"selector":{"type":"string"}},"required":["selector"]}),
             output_schema: document_payload_schema,
         },
         ToolDef {
             name: "multi_get",
-            description: "Retrieve multiple documents by pattern.",
+            description: "Retrieve multiple documents by pattern. Safe in offline mode.",
             input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}),
             output_schema: multi_get_schema,
         },
         ToolDef {
             name: "status",
-            description: "Return index health and metadata.",
+            description: "Return index health and metadata. Safe in offline mode.",
             input_schema: json!({"type":"object","properties":{}}),
             output_schema: status_schema,
         },
-    ]
+    ];
+
+    if cfg.mode != crate::config::ModeConfig::Offline {
+        tools.insert(
+            1,
+            ToolDef {
+                name: "vector_search",
+                description: "Execute semantic vector search. Enhanced mode only.",
+                input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+                output_schema: search_results_schema.clone(),
+            },
+        );
+        tools.insert(
+            2,
+            ToolDef {
+                name: "deep_search",
+                description: "Execute hybrid deep search. Enhanced mode only.",
+                input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+                output_schema: search_results_schema,
+            },
+        );
+    }
+
+    tools
 }
 
 fn jsonrpc_result(id: Value, result: Value) -> Value {
@@ -396,6 +533,7 @@ mod tests {
             db_path: Some(path.to_path_buf()),
             api_base_url: None,
             api_key: None,
+            offline: true,
             model_embedding: None,
             model_embedding_dim: None,
             model_llm: None,
@@ -482,7 +620,8 @@ mod tests {
 
     #[test]
     fn exposes_output_schema_for_search_tool() {
-        let tool = mcp_tools()
+        let runtime_cfg = cfg_with_db(tempdir().expect("tempdir").path());
+        let tool = mcp_tools(&runtime_cfg)
             .into_iter()
             .find(|tool| tool.name == "search")
             .expect("search tool");

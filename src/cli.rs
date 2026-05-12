@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(long, env = "QMD_API_KEY", global = true)]
     pub api_key: Option<String>,
 
+    /// Disable model-backed features and run in offline mode.
+    #[arg(long, global = true)]
+    pub offline: bool,
+
     /// Embedding model override.
     #[arg(long, env = "QMD_MODEL_EMBEDDING", global = true)]
     pub model_embedding: Option<String>,

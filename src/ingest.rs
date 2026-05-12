@@ -43,6 +43,8 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
 
     let collections = db.list_collections()?;
     let client = ApiClient::from_config(cfg);
+    let use_embeddings =
+        cfg.mode == crate::config::ModeConfig::Enhanced && !cfg.models.embedding.trim().is_empty();
 
     let mut summary = EmbedSummary {
         scanned_files: 0,
@@ -60,7 +62,7 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
         for entry in WalkDir::new(collection_path)
             .follow_links(false)
             .into_iter()
-            .filter_map(Result::ok)
+            .filter_map(std::result::Result::ok)
         {
             if !entry.file_type().is_file() {
                 continue;
@@ -100,7 +102,11 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
                 .iter()
                 .map(|c| c.content.as_str())
                 .collect::<Vec<_>>();
-            let embeddings = client.embed_texts(&cfg.models.embedding, &inputs).await?;
+            let embeddings = if use_embeddings {
+                client.embed_texts(&cfg.models.embedding, &inputs).await?
+            } else {
+                Vec::new()
+            };
 
             db.upsert_document(
                 &docid,
@@ -121,7 +127,96 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
     Ok(summary)
 }
 
-fn matches_collection_filters(
+/// Synchronize a single markdown file into the index.
+///
+/// # Arguments
+/// `cfg` - Effective runtime configuration.
+/// `db` - Database handle.
+/// `path` - File path to index.
+///
+/// # Returns
+/// `Ok(true)` if the file was indexed, `Ok(false)` if it was skipped.
+///
+/// # Errors
+/// Returns an error for I/O, API, or database failures.
+pub async fn sync_markdown_file(cfg: &Config, db: &Database, path: &Path) -> Result<bool> {
+    if !path.exists() || !path.is_file() || !is_markdown(path) {
+        return Ok(false);
+    }
+
+    let collections = db.list_collections()?;
+    let collection = collections.iter().find(|collection| {
+        let collection_path = Path::new(&collection.path);
+        path.starts_with(collection_path)
+            && matches_collection_filters(
+                path,
+                collection_path,
+                collection.include_glob.as_deref(),
+                collection.exclude_glob.as_deref(),
+            )
+            .unwrap_or(false)
+    });
+
+    let Some(collection) = collection else {
+        return Ok(false);
+    };
+
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read file: {}", path.display()))?;
+    let content_hash = content_hash(&text);
+
+    if db.is_document_unchanged(path, &content_hash)? {
+        return Ok(false);
+    }
+
+    let client = ApiClient::from_config(cfg);
+    let use_embeddings =
+        cfg.mode == crate::config::ModeConfig::Enhanced && !cfg.models.embedding.trim().is_empty();
+    let docid = docid_for_path(path);
+    let title = extract_title(&text);
+    let chunks = chunk_markdown(&text, ChunkerConfig::default());
+    if chunks.is_empty() {
+        return Ok(false);
+    }
+
+    let inputs = chunks
+        .iter()
+        .map(|c| c.content.as_str())
+        .collect::<Vec<_>>();
+    let embeddings = if use_embeddings {
+        client.embed_texts(&cfg.models.embedding, &inputs).await?
+    } else {
+        Vec::new()
+    };
+
+    db.upsert_document(
+        &docid,
+        collection.id,
+        path,
+        title.as_deref(),
+        &content_hash,
+        path_modified(path),
+    )?;
+    db.replace_document_chunks(&docid, path, &chunks, &embeddings)?;
+    Ok(true)
+}
+
+/// Remove a markdown file from the index if it is currently indexed.
+///
+/// # Arguments
+/// `db` - Database handle.
+/// `path` - File path to remove.
+///
+/// # Returns
+/// `Ok(true)` if a document was removed.
+///
+/// # Errors
+/// Returns an error for database failures.
+pub fn remove_markdown_file(db: &Database, path: &Path) -> Result<bool> {
+    db.delete_document_by_path(path)
+}
+
+pub(crate) fn matches_collection_filters(
     path: &Path,
     collection_root: &Path,
     include_glob: Option<&str>,
@@ -154,7 +249,7 @@ fn matches_collection_filters(
     Ok(true)
 }
 
-fn is_markdown(path: &Path) -> bool {
+pub(crate) fn is_markdown(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|v| v.to_str()),
         Some("md") | Some("markdown") | Some("mdx")

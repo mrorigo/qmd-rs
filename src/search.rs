@@ -84,6 +84,10 @@ pub async fn run_vector_search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
+    if cfg.mode == crate::config::ModeConfig::Offline {
+        let db = Database::open(cfg)?;
+        return run_local_fallback_search(&db, query, limit);
+    }
     let client = ApiClient::from_config(cfg);
     let vectors = client.embed_texts(&cfg.models.embedding, &[query]).await?;
     let query_embedding_json = serde_json::to_string(&vectors[0])?;
@@ -121,6 +125,10 @@ pub async fn run_vector_search(
 /// # Errors
 /// Returns an error when retrieval stages fail.
 pub async fn run_hybrid_query(cfg: &Config, query: &str) -> Result<Vec<SearchResult>> {
+    if cfg.mode == crate::config::ModeConfig::Offline {
+        let db = Database::open(cfg)?;
+        return run_local_hybrid_query(&db, query, cfg.query.rerank_top_k as usize);
+    }
     let client = ApiClient::from_config(cfg);
 
     let mut queries = vec![query.to_string()];
@@ -212,6 +220,76 @@ pub async fn run_hybrid_query(cfg: &Config, query: &str) -> Result<Vec<SearchRes
 
     blended.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(blended)
+}
+
+fn run_local_fallback_search(
+    db: &Database,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    run_bm25_search(db, query, limit)
+}
+
+fn run_local_hybrid_query(db: &Database, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    let mut queries = vec![query.to_string()];
+    for variant in local_query_variants(query, 2) {
+        if !queries.contains(&variant) {
+            queries.push(variant);
+        }
+    }
+
+    let contexts = db.list_contexts()?;
+    let mut all_lists: Vec<Vec<Candidate>> = Vec::new();
+    for q in &queries {
+        all_lists.push(
+            db.bm25_search(q, 25)?
+                .into_iter()
+                .map(|h| Candidate {
+                    docid: h.docid,
+                    path: h.path,
+                    title: h.title,
+                    snippet: h.snippet,
+                    source_score: 0.0,
+                })
+                .collect(),
+        );
+    }
+
+    let mut fused = rrf_fuse(&all_lists, 60.0);
+    fused.sort_by(|a, b| b.source_score.total_cmp(&a.source_score));
+    fused.truncate(limit);
+
+    let mut results = fused
+        .into_iter()
+        .enumerate()
+        .map(|(idx, c)| {
+            let contexts = contexts_for_path(&c.path, &contexts);
+            let w = if idx <= 2 { 1.0 } else { 0.9 };
+            SearchResult {
+                docid: c.docid,
+                path: c.path,
+                title: c.title,
+                snippet: c.snippet,
+                score: c.source_score * w,
+                contexts,
+            }
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(results)
+}
+
+fn local_query_variants(query: &str, _n: usize) -> Vec<String> {
+    let variant = query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if variant.is_empty() || variant == query {
+        Vec::new()
+    } else {
+        vec![variant]
+    }
 }
 
 fn rrf_fuse(lists: &[Vec<Candidate>], k: f64) -> Vec<Candidate> {
