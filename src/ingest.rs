@@ -42,9 +42,9 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
     }
 
     let collections = db.list_collections()?;
-    let client = ApiClient::from_config(cfg);
     let use_embeddings =
         cfg.mode == crate::config::ModeConfig::Enhanced && !cfg.models.embedding.trim().is_empty();
+    let client = use_embeddings.then(|| ApiClient::from_config(cfg));
 
     let mut summary = EmbedSummary {
         scanned_files: 0,
@@ -102,7 +102,7 @@ pub async fn run_embed(cfg: &Config, db: &Database, force: bool) -> Result<Embed
                 .iter()
                 .map(|c| c.content.as_str())
                 .collect::<Vec<_>>();
-            let embeddings = if use_embeddings {
+            let embeddings = if let Some(client) = &client {
                 client.embed_texts(&cfg.models.embedding, &inputs).await?
             } else {
                 Vec::new()
@@ -169,9 +169,9 @@ pub async fn sync_markdown_file(cfg: &Config, db: &Database, path: &Path) -> Res
         return Ok(false);
     }
 
-    let client = ApiClient::from_config(cfg);
     let use_embeddings =
         cfg.mode == crate::config::ModeConfig::Enhanced && !cfg.models.embedding.trim().is_empty();
+    let client = use_embeddings.then(|| ApiClient::from_config(cfg));
     let docid = docid_for_path(path);
     let title = extract_title(&text);
     let chunks = chunk_markdown(&text, ChunkerConfig::default());
@@ -183,7 +183,7 @@ pub async fn sync_markdown_file(cfg: &Config, db: &Database, path: &Path) -> Res
         .iter()
         .map(|c| c.content.as_str())
         .collect::<Vec<_>>();
-    let embeddings = if use_embeddings {
+    let embeddings = if let Some(client) = &client {
         client.embed_texts(&cfg.models.embedding, &inputs).await?
     } else {
         Vec::new()
