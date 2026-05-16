@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    convert::Infallible,
+    convert::{Infallible, TryFrom},
     net::SocketAddr,
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -213,21 +213,36 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
     let structured = match name {
         "search" => {
             let query = required_string(&args, "query")?;
+            let limit = optional_usize(&args, "limit")?.unwrap_or(20);
+            let min_score = optional_f64(&args, "min_score")?.unwrap_or(0.5);
             let db = Database::open(cfg)?;
-            serde_json::to_value(search::run_bm25_search(&db, query, 20)?)?
+            serde_json::to_value(filter_search_results(
+                search::run_bm25_search(&db, query, limit)?,
+                min_score,
+            ))?
         }
         "vector_search" => {
             if cfg.mode == crate::config::ModeConfig::Offline {
                 anyhow::bail!("vector_search is disabled in offline mode");
             }
             let query = required_string(&args, "query")?;
-            serde_json::to_value(search::run_vector_search(cfg, query, 20).await?)?
+            let limit = optional_usize(&args, "limit")?.unwrap_or(20);
+            let min_score = optional_f64(&args, "min_score")?.unwrap_or(0.5);
+            serde_json::to_value(filter_search_results(
+                search::run_vector_search(cfg, query, limit).await?,
+                min_score,
+            ))?
         }
         "deep_search" => {
+            let limit = optional_usize(&args, "limit")?.unwrap_or(20);
+            let min_score = optional_f64(&args, "min_score")?.unwrap_or(0.5);
             if cfg.mode == crate::config::ModeConfig::Offline {
                 let query = required_string(&args, "query")?;
                 let db = Database::open(cfg)?;
-                let results = search::run_bm25_search(&db, query, 20)?;
+                let results = filter_search_results(
+                    search::run_bm25_search(&db, query, limit)?,
+                    min_score,
+                );
                 let structured_content =
                     normalize_structured_content(serde_json::to_value(results)?);
                 return Ok(json!({
@@ -236,7 +251,10 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
                 }));
             }
             let query = required_string(&args, "query")?;
-            serde_json::to_value(search::run_hybrid_query(cfg, query).await?)?
+            serde_json::to_value(filter_search_results(
+                search::run_hybrid_query(cfg, query).await?,
+                min_score,
+            ))?
         }
         "get" => {
             let selector = required_string(&args, "selector")?;
@@ -371,6 +389,13 @@ fn normalize_structured_content(value: Value) -> Value {
     }
 }
 
+fn filter_search_results(results: Vec<search::SearchResult>, min_score: f64) -> Vec<search::SearchResult> {
+    results
+        .into_iter()
+        .filter(|result| result.score >= min_score)
+        .collect()
+}
+
 fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
     let search_result_schema = json!({
         "type": "object",
@@ -396,6 +421,15 @@ fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
             }
         },
         "required": ["results"]
+    });
+    let search_input_schema = json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" },
+            "limit": { "type": "integer", "minimum": 1, "default": 20 },
+            "min_score": { "type": "number", "minimum": 0.0, "default": 0.5 }
+        },
+        "required": ["query"]
     });
     let document_payload_schema = json!({
         "type": "object",
@@ -453,7 +487,7 @@ fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
         ToolDef {
             name: "search",
             description: "Execute BM25 keyword search. Safe in offline mode.",
-            input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            input_schema: search_input_schema.clone(),
             output_schema: search_results_schema.clone(),
         },
         ToolDef {
@@ -482,7 +516,7 @@ fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
             ToolDef {
                 name: "vector_search",
                 description: "Execute semantic vector search. Enhanced mode only.",
-                input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+                input_schema: search_input_schema.clone(),
                 output_schema: search_results_schema.clone(),
             },
         );
@@ -491,7 +525,7 @@ fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
             ToolDef {
                 name: "deep_search",
                 description: "Execute hybrid deep search. Enhanced mode only.",
-                input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+                input_schema: search_input_schema,
                 output_schema: search_results_schema,
             },
         );
@@ -513,6 +547,33 @@ fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required string argument: {key}"))
+}
+
+fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let parsed = value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("argument must be an unsigned integer: {key}"))?;
+            if parsed == 0 {
+                anyhow::bail!("argument must be at least 1: {key}");
+            }
+            usize::try_from(parsed)
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("argument too large for platform usize: {key}"))
+        }
+    }
+}
+
+fn optional_f64(args: &Value, key: &str) -> Result<Option<f64>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("argument must be a number: {key}")),
+    }
 }
 
 #[cfg(test)]
@@ -602,6 +663,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_applies_limit_and_min_score_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("add collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        let doc_path = dir.path().join("metrics.md");
+        db.upsert_document(
+            "doc-1",
+            collection.id,
+            &doc_path,
+            Some("Company Metrics"),
+            "hash-1",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-1",
+            &doc_path,
+            &[
+                Chunk {
+                    content: "company metrics status green".to_string(),
+                    token_count: 4,
+                    start_line: 1,
+                    end_line: 1,
+                },
+                Chunk {
+                    content: "company metrics status yellow".to_string(),
+                    token_count: 4,
+                    start_line: 2,
+                    end_line: 2,
+                },
+                Chunk {
+                    content: "company metrics status red".to_string(),
+                    token_count: 4,
+                    start_line: 3,
+                    end_line: 3,
+                },
+            ],
+            &[
+                vec![0.0_f32; cfg.models.embedding_dimensions],
+                vec![0.0_f32; cfg.models.embedding_dimensions],
+                vec![0.0_f32; cfg.models.embedding_dimensions],
+            ],
+        )
+        .expect("replace chunks");
+
+        let second_path = dir.path().join("status.md");
+        db.upsert_document(
+            "doc-2",
+            collection.id,
+            &second_path,
+            Some("Status Update"),
+            "hash-2",
+            None,
+        )
+        .expect("upsert second document");
+        db.replace_document_chunks(
+            "doc-2",
+            &second_path,
+            &[Chunk {
+                content: "company metrics status yellow".to_string(),
+                token_count: 4,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
+        )
+        .expect("replace second chunks");
+
+        let result = execute_tool_call(
+            &cfg,
+            "search",
+            json!({ "query": "company metrics", "limit": 1 }),
+        )
+        .await
+        .expect("execute search");
+
+        let structured = result
+            .get("structuredContent")
+            .and_then(serde_json::Value::as_object)
+            .expect("structured content object");
+        let results = structured
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .expect("results array");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["docid"], "doc-1");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_results_below_explicit_min_score() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        db.upsert_collection(dir.path(), &CollectionUpsert::default())
+            .expect("add collection");
+        let collection = db
+            .list_collections()
+            .expect("list collections")
+            .into_iter()
+            .next()
+            .expect("collection row");
+        let doc_path = dir.path().join("metrics.md");
+        db.upsert_document(
+            "doc-1",
+            collection.id,
+            &doc_path,
+            Some("Company Metrics"),
+            "hash-1",
+            None,
+        )
+        .expect("upsert document");
+        db.replace_document_chunks(
+            "doc-1",
+            &doc_path,
+            &[Chunk {
+                content: "company metrics status green".to_string(),
+                token_count: 4,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
+        )
+        .expect("replace chunks");
+
+        let result = execute_tool_call(
+            &cfg,
+            "search",
+            json!({ "query": "company metrics", "min_score": 1.1 }),
+        )
+        .await
+        .expect("execute search");
+
+        let structured = result
+            .get("structuredContent")
+            .and_then(serde_json::Value::as_object)
+            .expect("structured content object");
+        let results = structured
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .expect("results array");
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
     async fn get_returns_error_when_selector_is_missing() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
@@ -631,6 +850,14 @@ mod tests {
         assert_eq!(
             tool.output_schema["properties"]["results"]["type"],
             json!("array")
+        );
+        assert_eq!(
+            tool.input_schema["properties"]["limit"]["default"],
+            json!(20)
+        );
+        assert_eq!(
+            tool.input_schema["properties"]["min_score"]["default"],
+            json!(0.5)
         );
     }
 }
