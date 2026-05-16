@@ -211,6 +211,7 @@ Send JSON-RPC lines like:
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"test"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search","arguments":{"query":"test","collections":["notes","/Users/alice/notes/work"]}}}
 ```
 
 Available tools:
@@ -218,6 +219,8 @@ Available tools:
 - `search`
 - `vector_search`
 - `deep_search`
+
+Search tools accept an optional `collections` array. Each entry may be a registered collection `name` or exact collection `path`. Unknown entries are ignored, so you can safely pass a broader set of selectors and only matching collections will be used.
 - `get`
 - `multi_get`
 - `status`

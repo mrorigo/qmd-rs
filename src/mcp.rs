@@ -23,6 +23,7 @@ use std::{
     collections::HashMap,
     convert::{Infallible, TryFrom},
     net::SocketAddr,
+    path::Path,
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, SystemTime},
@@ -216,8 +217,10 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
             let limit = optional_usize(&args, "limit")?.unwrap_or(20);
             let min_score = optional_f64(&args, "min_score")?.unwrap_or(0.5);
             let db = Database::open(cfg)?;
+            let collections = selected_collection_roots(&db, &args)?;
             serde_json::to_value(filter_search_results(
                 search::run_bm25_search(&db, query, limit)?,
+                collections.as_deref(),
                 min_score,
             ))?
         }
@@ -228,19 +231,24 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
             let query = required_string(&args, "query")?;
             let limit = optional_usize(&args, "limit")?.unwrap_or(20);
             let min_score = optional_f64(&args, "min_score")?.unwrap_or(0.5);
+            let db = Database::open(cfg)?;
+            let collections = selected_collection_roots(&db, &args)?;
             serde_json::to_value(filter_search_results(
                 search::run_vector_search(cfg, query, limit).await?,
+                collections.as_deref(),
                 min_score,
             ))?
         }
         "deep_search" => {
             let limit = optional_usize(&args, "limit")?.unwrap_or(20);
             let min_score = optional_f64(&args, "min_score")?.unwrap_or(0.5);
+            let db = Database::open(cfg)?;
+            let collections = selected_collection_roots(&db, &args)?;
             if cfg.mode == crate::config::ModeConfig::Offline {
                 let query = required_string(&args, "query")?;
-                let db = Database::open(cfg)?;
                 let results = filter_search_results(
                     search::run_bm25_search(&db, query, limit)?,
+                    collections.as_deref(),
                     min_score,
                 );
                 let structured_content =
@@ -253,6 +261,7 @@ async fn execute_tool_call(cfg: &Config, name: &str, args: Value) -> Result<Valu
             let query = required_string(&args, "query")?;
             serde_json::to_value(filter_search_results(
                 search::run_hybrid_query(cfg, query).await?,
+                collections.as_deref(),
                 min_score,
             ))?
         }
@@ -389,11 +398,53 @@ fn normalize_structured_content(value: Value) -> Value {
     }
 }
 
-fn filter_search_results(results: Vec<search::SearchResult>, min_score: f64) -> Vec<search::SearchResult> {
+fn filter_search_results(
+    results: Vec<search::SearchResult>,
+    collection_roots: Option<&[String]>,
+    min_score: f64,
+) -> Vec<search::SearchResult> {
     results
         .into_iter()
         .filter(|result| result.score >= min_score)
+        .filter(|result| {
+            collection_roots
+                .map(|roots| {
+                    roots.iter().any(|root| {
+                        let root_path = Path::new(root);
+                        Path::new(&result.path).starts_with(root_path)
+                    })
+                })
+                .unwrap_or(true)
+        })
         .collect()
+}
+
+fn selected_collection_roots(db: &Database, args: &Value) -> Result<Option<Vec<String>>> {
+    let Some(requested) = optional_string_array(args, "collections")? else {
+        return Ok(None);
+    };
+
+    if requested.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let collections = db.list_collections()?;
+    let mut roots = Vec::new();
+    for selector in requested {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            continue;
+        }
+        if let Some(collection) = collections.iter().find(|collection| {
+            collection.path == selector || collection.name.as_deref() == Some(selector)
+        }) {
+            if !roots.contains(&collection.path) {
+                roots.push(collection.path.clone());
+            }
+        }
+    }
+
+    Ok((!roots.is_empty()).then_some(roots))
 }
 
 fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
@@ -427,7 +478,12 @@ fn mcp_tools(cfg: &Config) -> Vec<ToolDef> {
         "properties": {
             "query": { "type": "string" },
             "limit": { "type": "integer", "minimum": 1, "default": 20 },
-            "min_score": { "type": "number", "minimum": 0.0, "default": 0.5 }
+            "min_score": { "type": "number", "minimum": 0.0, "default": 0.5 },
+            "collections": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional collection names or paths to search within."
+            }
         },
         "required": ["query"]
     });
@@ -576,6 +632,24 @@ fn optional_f64(args: &Value, key: &str) -> Result<Option<f64>> {
     }
 }
 
+fn optional_string_array(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let values = items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                        anyhow::anyhow!("argument must be an array of strings: {key}")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Some(values))
+        }
+        Some(_) => anyhow::bail!("argument must be an array of strings: {key}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{execute_tool_call, mcp_tools};
@@ -605,6 +679,27 @@ mod tests {
             }),
         };
         config::load(&cli).expect("load config")
+    }
+
+    fn insert_collection(
+        db: &Database,
+        path: &std::path::Path,
+        name: Option<&str>,
+    ) -> crate::db::Collection {
+        db.upsert_collection(
+            path,
+            &CollectionUpsert {
+                name: name.map(ToOwned::to_owned),
+                ..CollectionUpsert::default()
+            },
+        )
+        .expect("add collection");
+        let path_text = path.to_string_lossy().to_string();
+        db.list_collections()
+            .expect("list collections")
+            .into_iter()
+            .find(|collection| collection.path == path_text)
+            .expect("collection row")
     }
 
     #[tokio::test]
@@ -821,6 +916,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_filters_by_collection_name_and_path() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        let notes_root = dir.path().join("notes");
+        let docs_root = dir.path().join("docs");
+        std::fs::create_dir_all(&notes_root).expect("create notes root");
+        std::fs::create_dir_all(&docs_root).expect("create docs root");
+
+        let notes = insert_collection(&db, &notes_root, Some("notes"));
+        let docs = insert_collection(&db, &docs_root, Some("docs"));
+
+        let notes_path = notes_root.join("metrics.md");
+        db.upsert_document(
+            "doc-notes",
+            notes.id,
+            &notes_path,
+            Some("Notes Metrics"),
+            "hash-notes",
+            None,
+        )
+        .expect("upsert notes doc");
+        db.replace_document_chunks(
+            "doc-notes",
+            &notes_path,
+            &[Chunk {
+                content: "company metrics alpha".to_string(),
+                token_count: 3,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
+        )
+        .expect("replace notes chunks");
+
+        let docs_path = docs_root.join("metrics.md");
+        db.upsert_document(
+            "doc-docs",
+            docs.id,
+            &docs_path,
+            Some("Docs Metrics"),
+            "hash-docs",
+            None,
+        )
+        .expect("upsert docs doc");
+        db.replace_document_chunks(
+            "doc-docs",
+            &docs_path,
+            &[Chunk {
+                content: "company metrics beta".to_string(),
+                token_count: 3,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
+        )
+        .expect("replace docs chunks");
+
+        let by_name = execute_tool_call(
+            &cfg,
+            "search",
+            json!({ "query": "company metrics", "collections": ["notes"] }),
+        )
+        .await
+        .expect("execute search by name");
+        let by_name_results = by_name
+            .get("structuredContent")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|obj| obj.get("results"))
+            .and_then(serde_json::Value::as_array)
+            .expect("results array");
+        assert_eq!(by_name_results.len(), 1);
+        assert_eq!(by_name_results[0]["docid"], "doc-notes");
+
+        let by_path = execute_tool_call(
+            &cfg,
+            "search",
+            json!({ "query": "company metrics", "collections": [docs_root.to_string_lossy()] }),
+        )
+        .await
+        .expect("execute search by path");
+        let by_path_results = by_path
+            .get("structuredContent")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|obj| obj.get("results"))
+            .and_then(serde_json::Value::as_array)
+            .expect("results array");
+        assert_eq!(by_path_results.len(), 1);
+        assert_eq!(by_path_results[0]["docid"], "doc-docs");
+    }
+
+    #[tokio::test]
+    async fn search_ignores_unknown_collection_selectors() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let cfg = cfg_with_db(&db_path);
+        let db = Database::open(&cfg).expect("open db");
+
+        let notes_root = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_root).expect("create notes root");
+        let notes = insert_collection(&db, &notes_root, Some("notes"));
+        let notes_path = notes_root.join("metrics.md");
+        db.upsert_document(
+            "doc-notes",
+            notes.id,
+            &notes_path,
+            Some("Notes Metrics"),
+            "hash-notes",
+            None,
+        )
+        .expect("upsert notes doc");
+        db.replace_document_chunks(
+            "doc-notes",
+            &notes_path,
+            &[Chunk {
+                content: "company metrics alpha".to_string(),
+                token_count: 3,
+                start_line: 1,
+                end_line: 1,
+            }],
+            &[vec![0.0_f32; cfg.models.embedding_dimensions]],
+        )
+        .expect("replace notes chunks");
+
+        let result = execute_tool_call(
+            &cfg,
+            "search",
+            json!({ "query": "company metrics", "collections": ["missing", "/does/not/exist"] }),
+        )
+        .await
+        .expect("execute search");
+
+        let structured = result
+            .get("structuredContent")
+            .and_then(serde_json::Value::as_object)
+            .expect("structured content object");
+        let results = structured
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .expect("results array");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["docid"], "doc-notes");
+    }
+
+    #[tokio::test]
     async fn get_returns_error_when_selector_is_missing() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
@@ -858,6 +1101,10 @@ mod tests {
         assert_eq!(
             tool.input_schema["properties"]["min_score"]["default"],
             json!(0.5)
+        );
+        assert_eq!(
+            tool.input_schema["properties"]["collections"]["type"],
+            json!("array")
         );
     }
 }
